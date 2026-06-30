@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The SDK posts events to the edge over HTTPS. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>

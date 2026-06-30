@@ -1,0 +1,8 @@
+# JitPack build configuration — https://jitpack.io/docs/
+# Builds the AAR with the committed Gradle wrapper (8.9, compatible with AGP 8.5)
+# and publishes it to the local Maven repo, which JitPack serves as
+#   com.github.victorgxn:apptrack-android:<tag>
+jdk:
+  - openjdk17
+install:
+  - ./gradlew clean publishToMavenLocal
