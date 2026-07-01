@@ -4,7 +4,7 @@ plugins {
     id("maven-publish")
 }
 
-// JitPack publishes under the repo owner's group. See sdk/android/README.md.
+// JitPack publishes under the repo owner's group. See README.md.
 group = "com.github.victorgxn"
 version = "0.1.0"
 
