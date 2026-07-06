@@ -9,7 +9,7 @@ group = "com.github.victorgxn"
 version = "0.1.0"
 
 android {
-    namespace = "io.apptrack.sdk"
+    namespace = "io.attriloop.sdk"
     compileSdk = 34
 
     defaultConfig {
@@ -47,12 +47,12 @@ dependencies {
 }
 
 // Publication consumed by JitPack:
-//   implementation("com.github.victorgxn:apptrack-android:<tag>")
+//   implementation("com.github.victorgxn:attriloop-android:<tag>")
 publishing {
     publications {
         register<MavenPublication>("release") {
             groupId = "com.github.victorgxn"
-            artifactId = "apptrack-android"
+            artifactId = "attriloop-android"
             version = "0.1.0"
             afterEvaluate { from(components["release"]) }
         }

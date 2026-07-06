@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "apptrack-android"
+rootProject.name = "attriloop-android"

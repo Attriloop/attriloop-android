@@ -1,6 +1,6 @@
-# AppsTrack Android SDK
+# Attriloop Android SDK
 
-Kotlin SDK for AppsTrack — mobile attribution for influencer/creator links.
+Kotlin SDK for Attriloop — mobile attribution for influencer/creator links.
 
 ## Install (JitPack)
 
@@ -17,7 +17,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.victorgxn:apptrack-android:0.1.0")
+    implementation("com.github.victorgxn:attriloop-android:0.1.0")
 }
 ```
 
@@ -28,29 +28,29 @@ Play Store attribution.
 ## Usage
 
 ```kotlin
-import io.apptrack.sdk.AppsTrack
-import io.apptrack.sdk.AppsTrackEvent
+import io.attriloop.sdk.Attriloop
+import io.attriloop.sdk.AttriloopEvent
 
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        AppsTrack.configure(this, apiKey = "at_live_...")
+        Attriloop.configure(this, apiKey = "at_live_...")
     }
 }
 
 // Later, anywhere:
-AppsTrack.sendEvent(
-    AppsTrackEvent.PURCHASE,
+Attriloop.sendEvent(
+    AttriloopEvent.PURCHASE,
     parameters = mapOf("revenue" to 29.99, "currency" to "USD"),
 )
 
 // CUSTOM events require a name (use the dedicated helper):
-AppsTrack.sendCustomEvent("share_referral", parameters = mapOf("channel" to "whatsapp"))
+Attriloop.sendCustomEvent("share_referral", parameters = mapOf("channel" to "whatsapp"))
 
 // Deferred attribution / creator params (resolved a few seconds after first-open):
-val params = AppsTrack.getAttributionParams() // mediaSource, campaignName, linkId, …
+val params = Attriloop.getAttributionParams() // mediaSource, campaignName, linkId, …
 // …or be called back the moment it resolves:
-AppsTrack.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p["linkId"] */ }
+Attriloop.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p["linkId"] */ }
 ```
 
 ## How attribution works
@@ -66,9 +66,9 @@ AppsTrack.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p[
 
 ## Parity with iOS
 
-Same public surface as the iOS `AppsTrackSDK`: `configure`, `sendEvent`,
-`sendCustomEvent`, `getApptrackId`, `getAttributionParams` (sync + async callback).
-Event names are identical (`AppsTrackEvent`).
+Same public surface as the iOS `AttriloopSDK`: `configure`, `sendEvent`,
+`sendCustomEvent`, `getAttriloopId`, `getAttributionParams` (sync + async callback).
+Event names are identical (`AttriloopEvent`).
 
 ## Build & test
 
@@ -86,5 +86,5 @@ JitPack builds from a Git tag (config in `jitpack.yml`). Push a tag matching the
 git tag 0.1.0 && git push origin 0.1.0
 ```
 
-Then the first resolve of `com.github.victorgxn:apptrack-android:0.1.0` triggers the
-JitPack build; confirm it at `https://jitpack.io/#victorgxn/apptrack-android`.
+Then the first resolve of `com.github.victorgxn:attriloop-android:0.1.0` triggers the
+JitPack build; confirm it at `https://jitpack.io/#victorgxn/attriloop-android`.

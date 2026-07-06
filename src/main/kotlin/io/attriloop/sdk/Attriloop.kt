@@ -1,4 +1,4 @@
-package io.apptrack.sdk
+package io.attriloop.sdk
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Standard event types. INSTALL is emitted by the backend on first-open. */
-enum class AppsTrackEvent(val raw: String) {
+enum class AttriloopEvent(val raw: String) {
     LOGIN("LOGIN"),
     SIGN_UP("SIGN_UP"),
     REGISTER("REGISTER"),
@@ -39,21 +39,21 @@ enum class AppsTrackEvent(val raw: String) {
 }
 
 /**
- * AppsTrack Android SDK. Mirrors the iOS surface.
+ * Attriloop Android SDK. Mirrors the iOS surface.
  *
  * ```kotlin
- * AppsTrack.configure(context, "at_live_...")
- * AppsTrack.sendEvent(AppsTrackEvent.PURCHASE, parameters = mapOf("revenue" to 29.99, "currency" to "USD"))
- * AppsTrack.sendCustomEvent("share_referral", parameters = mapOf("channel" to "whatsapp"))
+ * Attriloop.configure(context, "at_live_...")
+ * Attriloop.sendEvent(AttriloopEvent.PURCHASE, parameters = mapOf("revenue" to 29.99, "currency" to "USD"))
+ * Attriloop.sendCustomEvent("share_referral", parameters = mapOf("channel" to "whatsapp"))
  * ```
  *
  * On first-open it fetches the Google Play Install Referrer (deterministic
  * attribution: the redirect edge packs our `at_click` token into the Play Store
  * `referrer` param) and posts it with the install.
  */
-object AppsTrack {
-    private const val PREFS = "com.apptrack.sdk"
-    private const val ID_KEY = "apptrack_id"
+object Attriloop {
+    private const val PREFS = "com.attriloop.sdk"
+    private const val ID_KEY = "attriloop_id"
     private const val INSTALLED_KEY = "installed"
     private const val ATTR_KEY = "attribution"
     private const val QUEUE_KEY = "queue" // persisted offline event buffer
@@ -63,7 +63,7 @@ object AppsTrack {
     private val io = Executors.newSingleThreadScheduledExecutor()
     private lateinit var prefs: SharedPreferences
     private var apiKey = ""
-    private var baseUrl = "https://edge.apptrack.io"
+    private var baseUrl = "https://edge.attriloop.io"
     private var debug = false
     private var packageName = ""
 
@@ -86,7 +86,7 @@ object AppsTrack {
 
     /** Public install/device id — the attribution subject. */
     @JvmStatic
-    var apptrackId: String = ""
+    var attriloopId: String = ""
         private set
 
     @JvmStatic
@@ -99,7 +99,7 @@ object AppsTrack {
         if (baseUrl != null) this.baseUrl = baseUrl.trimEnd('/')
         this.debug = debug
 
-        this.apptrackId = prefs.getString(ID_KEY, null) ?: UUID.randomUUID().toString().also {
+        this.attriloopId = prefs.getString(ID_KEY, null) ?: UUID.randomUUID().toString().also {
             prefs.edit().putString(ID_KEY, it).apply()
         }
         prefs.getString(ATTR_KEY, null)?.let {
@@ -129,19 +129,19 @@ object AppsTrack {
      */
     @JvmStatic
     @JvmOverloads
-    fun sendEvent(event: AppsTrackEvent, name: String? = null, parameters: Map<String, Any?>? = null) {
+    fun sendEvent(event: AttriloopEvent, name: String? = null, parameters: Map<String, Any?>? = null) {
         // A CUSTOM event with no name is rejected by the backend (422) and the offline
         // queue would then drop it as a permanent failure — silently losing it. Refuse
         // it here so the mistake is visible in debug. Use sendCustomEvent(name, …).
         if (isDroppableCustom(event, name)) {
-            if (debug) println("[AppsTrack] CUSTOM event requires a non-empty name — event dropped")
+            if (debug) println("[Attriloop] CUSTOM event requires a non-empty name — event dropped")
             return
         }
         // SimpleDateFormat is NOT thread-safe and sendEvent runs on arbitrary caller
         // threads — synchronize access to the shared formatter.
         val eventTime = synchronized(iso) { iso.format(Date()) }
         val item = JSONObject()
-            .put("apptrackId", apptrackId)
+            .put("attriloopId", attriloopId)
             .put("appId", packageName)
             .put("event", event.raw)
             .put("eid", UUID.randomUUID().toString()) // idempotency key; backend dedupes retries
@@ -156,11 +156,11 @@ object AppsTrack {
     @JvmStatic
     @JvmOverloads
     fun sendCustomEvent(name: String, parameters: Map<String, Any?>? = null) =
-        sendEvent(AppsTrackEvent.CUSTOM, name, parameters)
+        sendEvent(AttriloopEvent.CUSTOM, name, parameters)
 
     /** A CUSTOM event with no usable name can never be ingested. Pure; for tests. */
-    internal fun isDroppableCustom(event: AppsTrackEvent, name: String?): Boolean =
-        event == AppsTrackEvent.CUSTOM && name.isNullOrEmpty()
+    internal fun isDroppableCustom(event: AttriloopEvent, name: String?): Boolean =
+        event == AttriloopEvent.CUSTOM && name.isNullOrEmpty()
 
     /** Append to the persisted queue (capped — oldest dropped first). Runs on `io`. */
     private fun enqueue(item: JSONObject) {
@@ -169,7 +169,7 @@ object AppsTrack {
             arr.put(item)
             val out = cappedQueue(arr, MAX_QUEUE)
             if (debug && out.length() < arr.length()) {
-                println("[AppsTrack] event queue full — dropping ${arr.length() - out.length()} oldest")
+                println("[Attriloop] event queue full — dropping ${arr.length() - out.length()} oldest")
             }
             prefs.edit().putString(QUEUE_KEY, out.toString()).apply()
         }
@@ -222,7 +222,7 @@ object AppsTrack {
                 return@execute
             }
             if (outcome == Outcome.PERMANENT && debug) {
-                println("[AppsTrack] dropping permanently-rejected event")
+                println("[Attriloop] dropping permanently-rejected event")
             }
             val cur = readQueue()
             val next = JSONArray()
@@ -232,7 +232,7 @@ object AppsTrack {
         }
     }
 
-    // Note: `apptrackId` (a @JvmStatic property) already exposes `getApptrackId()` to
+    // Note: `attriloopId` (a @JvmStatic property) already exposes `getAttriloopId()` to
     // Java via its generated getter — a separate fun would clash on the JVM signature.
 
     /** Resolved attribution params (mediaSource, campaignName, linkId, …); empty until resolved. */
@@ -304,7 +304,7 @@ object AppsTrack {
             .put("locale", Locale.getDefault().toLanguageTag())
             .put("timezone", TimeZone.getDefault().id)
         val body = JSONObject()
-            .put("apptrackId", apptrackId)
+            .put("attriloopId", attriloopId)
             .put("appId", packageName)
             .put("device", device)
             .put("sdkVersion", SDK_VERSION)
@@ -323,12 +323,12 @@ object AppsTrack {
 
     /** Poll until attribution resolves (it runs async on the backend), backing off. */
     private fun fetchAttribution(attempt: Int) {
-        if (apptrackId.isEmpty()) return
+        if (attriloopId.isEmpty()) return
         if (attempt == 0 && !polling.compareAndSet(false, true)) return // a chain already runs
         val delays = longArrayOf(2000, 4000, 8000, 16000)
         io.execute {
-            val enc = URLEncoder.encode(apptrackId, "UTF-8")
-            val json = get("/v1/attribution?apptrackId=$enc")
+            val enc = URLEncoder.encode(attriloopId, "UTF-8")
+            val json = get("/v1/attribution?attriloopId=$enc")
             val status = json?.optString("status", "pending")
             if (json != null && status != "pending") {
                 attribution = jsonToMap(json)
