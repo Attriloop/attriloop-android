@@ -1,4 +1,32 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- The SDK posts events to the edge over HTTPS. -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      App Links (open-if-installed) are configured by the HOST app, not this library
+      (it can't know the host's edge host or linkToken). In the host's launch Activity,
+      add an autoVerify intent-filter for the namespaced link path, then forward the
+      Uri to the SDK from onCreate() and onNewIntent():
+
+        <activity android:name=".MainActivity" android:exported="true">
+          <intent-filter android:autoVerify="true">
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https"
+                  android:host="EDGE_HOST"
+                  android:pathPrefix="/l/PROJECT_LINK_TOKEN" />
+          </intent-filter>
+        </activity>
+
+      PROJECT_LINK_TOKEN is the Attriloop project's link token (shared by the project's
+      iOS + Android apps), shown in the Attriloop console. Both platforms use this same
+      token, so one link opens either app.
+
+        override fun onCreate(b: Bundle?) { super.onCreate(b); Attriloop.handleDeepLink(intent?.data) }
+        override fun onNewIntent(i: Intent) { super.onNewIntent(i); Attriloop.handleDeepLink(i.data) }
+
+      Domain verification also requires /.well-known/assetlinks.json on EDGE_HOST to
+      list the app's package + Play App Signing SHA-256 (set in the Attriloop console).
+    -->
 </manifest>

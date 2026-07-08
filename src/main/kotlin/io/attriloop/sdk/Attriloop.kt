@@ -2,6 +2,7 @@ package io.attriloop.sdk
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Build
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
@@ -56,6 +57,8 @@ object Attriloop {
     private const val ID_KEY = "attriloop_id"
     private const val INSTALLED_KEY = "installed"
     private const val ATTR_KEY = "attribution"
+    private const val CLICK_KEY = "clickId" // at_click captured from a deep link
+    private const val DEEPLINK_KEY = "deepLink" // last resolved deep_link_value
     private const val QUEUE_KEY = "queue" // persisted offline event buffer
     private const val MAX_QUEUE = 500 // oldest dropped beyond this
     private const val SDK_VERSION = "android/0.1.0"
@@ -63,7 +66,7 @@ object Attriloop {
     private val io = Executors.newSingleThreadScheduledExecutor()
     private lateinit var prefs: SharedPreferences
     private var apiKey = ""
-    private var baseUrl = "https://edge.attriloop.io"
+    private var baseUrl = "https://edge.attriloop.com"
     private var debug = false
     private var packageName = ""
 
@@ -78,6 +81,21 @@ object Attriloop {
 
     // Async attribution waiters, flushed once the poll chain resolves or gives up.
     private val handlers = ArrayList<(Map<String, Any?>) -> Unit>()
+
+    // Deferred deep-link destination (`deep_link_value`) + its subscribers.
+    //
+    // ONCE-ONLY DELIVERY: a resolved deep_link_value is broadcast to onDeepLink
+    // subscribers EXACTLY ONCE per resolution, then consumed. `deepLinkPending` is a
+    // non-persisted, in-memory flag that is true ONLY while a value resolved in THIS
+    // session (via setDeepLink — from an App Link resolve or the attribution poll) is
+    // still waiting to be delivered. A value merely reloaded from SharedPreferences in
+    // configure() is NOT pending: it populates `deepLink` for getDeepLink() reads but
+    // must never auto-re-broadcast to onDeepLink on a later (e.g. organic) launch.
+    @Volatile
+    private var deepLink: String? = null
+    @Volatile
+    private var deepLinkPending: Boolean = false
+    private val deepLinkHandlers = ArrayList<(String) -> Unit>()
 
     // Guards: install is sent exactly once across the referrer callbacks; only one
     // attribution poll chain runs at a time.
@@ -110,6 +128,10 @@ object Attriloop {
                 if (debug) e.printStackTrace()
             }
         }
+        // Reload the last persisted deep_link_value for getDeepLink() reads, but leave
+        // it NOT pending: a value from a previous launch is already-consumed and must
+        // not re-fire onDeepLink (see the once-only note on deepLinkPending).
+        deepLink = prefs.getString(DEEPLINK_KEY, null)
 
         // INSTALLED_KEY is committed only after the install POST succeeds (sendInstall),
         // so a first-open with no connectivity retries on the next launch instead of
@@ -266,6 +288,104 @@ object Attriloop {
         pending.forEach { it(result) }
     }
 
+    // ── deep links ───────────────────────────────────────────────────────────
+
+    /**
+     * Handle a deep link / App Link that launched or resumed the app. Call from
+     * `onCreate` / `onNewIntent` with `intent.data`. Accepts either an explicit
+     * `at_click` query token, or a namespaced App Link `https://<host>/l/<token>/<slug>`
+     * which is resolved via `/v1/resolve` to fetch the click id + `deep_link_value`.
+     */
+    @JvmStatic
+    fun handleDeepLink(uri: Uri?) {
+        if (uri == null || !::prefs.isInitialized) return // configure() must run first
+        val click = uri.getQueryParameter("at_click")
+        if (!click.isNullOrEmpty()) {
+            prefs.edit().putString(CLICK_KEY, click).apply()
+            fetchAttribution(0)
+            return
+        }
+        val segments = uri.pathSegments
+        if (segments.size >= 3 && segments[0] == "l") {
+            resolveDeepLink(segments[2])
+        }
+    }
+
+    /** Resolve a namespaced App Link's slug to its click id + deep-link value. Runs on `io`. */
+    private fun resolveDeepLink(slug: String) {
+        if (apiKey.isEmpty()) return
+        io.execute {
+            val enc = URLEncoder.encode(slug, "UTF-8")
+            val json = get("/v1/resolve?slug=$enc") ?: return@execute
+            json.optString("at_click", "").takeIf { it.isNotEmpty() }?.let {
+                prefs.edit().putString(CLICK_KEY, it).apply()
+            }
+            json.optString("deep_link_value", "").takeIf { it.isNotEmpty() }?.let { setDeepLink(it) }
+            fetchAttribution(0)
+        }
+    }
+
+    /**
+     * Cache a THIS-session deep-link resolution and broadcast it to onDeepLink
+     * subscribers exactly once. Called only from resolveDeepLink / fetchAttribution, so
+     * the value is always a FRESH resolution: it is marked pending, then delivered and
+     * consumed by deliverDeepLink. Runs on the `io` thread.
+     */
+    private fun setDeepLink(value: String) {
+        deepLink = value
+        deepLinkPending = true
+        // Persist so getDeepLink() survives process death. deliverDeepLink removes the
+        // key once the value is consumed, so a delivered resolution never re-broadcasts
+        // on the next launch.
+        prefs.edit().putString(DEEPLINK_KEY, value).apply()
+        deliverDeepLink()
+    }
+
+    /**
+     * Deliver a pending (fresh, this-session) resolution to the current subscribers
+     * exactly once, then consume it by clearing the pending flag. No-op when nothing is
+     * pending or no one is subscribed yet — in the latter case the value stays pending
+     * and a later onDeepLink call delivers it.
+     *
+     * The persisted DEEPLINK_KEY is intentionally NOT removed: it feeds getDeepLink()
+     * across launches AND, reloaded into `deepLink` in configure(), it lets the
+     * attribution poll's `dlv != deepLink` guard suppress a re-fire when the server
+     * re-returns the same deep_link_value on the next launch. Consuming the persisted
+     * value here would make `deepLink` reload as null and defeat that guard, re-firing
+     * the destination on every organic launch. Re-fire is blocked instead by
+     * `deepLinkPending` (in-memory, false on a cold launch).
+     */
+    private fun deliverDeepLink() {
+        val value: String
+        val pending: List<(String) -> Unit>
+        synchronized(deepLinkHandlers) {
+            if (!deepLinkPending || deepLinkHandlers.isEmpty()) return
+            value = deepLink ?: return
+            pending = ArrayList(deepLinkHandlers)
+            deepLinkPending = false // consumed — this resolution won't be delivered again
+        }
+        pending.forEach { it(value) }
+    }
+
+    /** The last resolved deferred deep-link destination (`deep_link_value`), or null. */
+    @JvmStatic
+    fun getDeepLink(): String? = deepLink
+
+    /**
+     * Subscribe to deep-link resolutions. Fires with the `deep_link_value` each time
+     * one resolves in THIS session (App Link or deferred install). If a fresh resolution
+     * is already pending it fires immediately; a value merely restored from a previous
+     * launch does NOT fire (once-only semantics — see the note on deepLinkPending), so
+     * the destination is never re-navigated on an organic launch. Callbacks run on the
+     * SDK's background thread — dispatch to the main thread before touching UI. Treat the
+     * value as UNTRUSTED input when routing.
+     */
+    @JvmStatic
+    fun onDeepLink(callback: (String) -> Unit) {
+        synchronized(deepLinkHandlers) { deepLinkHandlers.add(callback) }
+        deliverDeepLink() // fires + consumes only if a fresh this-session value is pending
+    }
+
     // ── internals ──────────────────────────────────────────────────────────
 
     private fun fetchReferrerThenInstall(context: Context) {
@@ -310,6 +430,9 @@ object Attriloop {
             .put("sdkVersion", SDK_VERSION)
             .put("installType", "new_install")
         if (!referrer.isNullOrEmpty()) body.put("installReferrer", referrer)
+        // Deterministic click id from an App Link opened before install (if any). The
+        // Play referrer above is the primary signal; this covers a pre-install app-link tap.
+        prefs.getString(CLICK_KEY, null)?.let { if (it.isNotEmpty()) body.put("clickId", it) }
         postWithResult("/v1/install", body, 0) { ok ->
             if (ok) {
                 prefs.edit().putBoolean(INSTALLED_KEY, true).apply()
@@ -334,6 +457,15 @@ object Attriloop {
                 attribution = jsonToMap(json)
                 prefs.edit().putString(ATTR_KEY, json.toString()).apply()
                 polling.set(false)
+                // Deferred deep link: surface deep_link_value for navigation ONLY on a
+                // trustworthy match (deterministic rung or high confidence) so a
+                // low-confidence fingerprint guess doesn't misroute the user.
+                val dlv = json.optString("deep_link_value", "")
+                if (dlv.isNotEmpty() && dlv != deepLink) {
+                    val method = json.optString("matchMethod", "")
+                    val deterministic = method == "deeplink" || method == "play_referrer"
+                    if (deterministic || json.optString("confidence", "") == "high") setDeepLink(dlv)
+                }
                 flushHandlers(attribution)
             } else if (attempt < delays.size) {
                 io.schedule({ fetchAttribution(attempt + 1) }, delays[attempt], TimeUnit.MILLISECONDS)
