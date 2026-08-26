@@ -29,7 +29,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew test
+
+      - name: Android lint
+        run: ./gradlew lint
 
       - name: Build release AAR
         run: ./gradlew assembleRelease
