@@ -32,6 +32,11 @@ The library declares `INTERNET` and ships `consumer-rules.pro` (R8/ProGuard safe
 It depends on `com.android.installreferrer:installreferrer` for deterministic
 Play Store attribution.
 
+It does not declare `AD_ID`, location, contacts, phone or storage permissions. Country
+is derived server-side from the request IP, and Android's probabilistic fallback uses a
+one-way fingerprint of IP/platform/locale when no deterministic referrer exists. Review
+the complete [Google Play Data Safety guidance](PRIVACY.md) before publishing a host app.
+
 ## Usage
 
 ```kotlin
@@ -91,6 +96,10 @@ Event names are identical (`AttriloopEvent`).
 ./gradlew assembleRelease     # build the release AAR
 ./gradlew publishToMavenLocal # build the AAR locally
 ```
+
+CI inspects the merged release manifest, so a transitive dependency cannot silently
+add advertising ID, location, phone, contacts or legacy storage access without failing
+the build and forcing a disclosure/consent review.
 
 ## Releasing
 
