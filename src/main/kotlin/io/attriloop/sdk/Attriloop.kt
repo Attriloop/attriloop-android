@@ -40,6 +40,9 @@ enum class AttriloopEvent(val raw: String) {
     CUSTOM("CUSTOM"),
 }
 
+/** Result returned by [Attriloop.sendTestEvent] during SDK onboarding. */
+data class AttriloopTestResult(val success: Boolean, val message: String)
+
 /**
  * Attriloop Android SDK. Mirrors the iOS surface.
  *
@@ -182,6 +185,63 @@ object Attriloop {
     @JvmOverloads
     fun sendCustomEvent(name: String, parameters: Map<String, Any?>? = null) =
         sendEvent(AttriloopEvent.CUSTOM, name, parameters)
+
+    /**
+     * Verify that the configured SDK key can reach Attriloop. The callback runs on
+     * the SDK background executor; dispatch to the main thread before updating UI.
+     * A successful response also stamps the app as connected in the dashboard.
+     */
+    @JvmStatic
+    fun sendTestEvent(callback: (AttriloopTestResult) -> Unit) {
+        if (apiKey.isBlank()) {
+            callback(AttriloopTestResult(false, "Call configure() before sendTestEvent()."))
+            return
+        }
+        io.execute {
+            val result = try {
+                val conn = open("/v1/test", "POST")
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { it.write("{}".toByteArray()) }
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.bufferedReader()?.use(BufferedReader::readText)
+                conn.disconnect()
+                interpretTestResponse(code, text)
+            } catch (e: Exception) {
+                if (debug) e.printStackTrace()
+                AttriloopTestResult(false, "Couldn't reach Attriloop. Check the endpoint and network.")
+            }
+            try {
+                callback(result)
+            } catch (e: Exception) {
+                if (debug) e.printStackTrace()
+            }
+        }
+    }
+
+    /** Convert the connectivity endpoint response to the stable public result. */
+    internal fun interpretTestResponse(code: Int, body: String?): AttriloopTestResult {
+        val json = try {
+            body?.takeIf(String::isNotBlank)?.let(::JSONObject)
+        } catch (_: Exception) {
+            null
+        }
+        val message = json?.optString("message")?.takeIf(String::isNotBlank)
+        return if (code in 200..299 && json?.optBoolean("ok", true) != false) {
+            AttriloopTestResult(true, message ?: "SDK connected.")
+        } else {
+            AttriloopTestResult(
+                false,
+                message ?: when (code) {
+                    401 -> "Invalid API key."
+                    403 -> "This key cannot send SDK events."
+                    429 -> "Rate limited. Try again shortly."
+                    else -> "Attriloop returned HTTP $code."
+                },
+            )
+        }
+    }
 
     /** A CUSTOM event with no usable name can never be ingested. Pure; for tests. */
     internal fun isDroppableCustom(event: AttriloopEvent, name: String?): Boolean =

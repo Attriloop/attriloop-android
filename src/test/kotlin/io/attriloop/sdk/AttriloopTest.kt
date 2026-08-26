@@ -81,6 +81,21 @@ class AttriloopTest {
         assertTrue(Attriloop.isAllowedBaseUrl("http://127.0.0.1:8787", true))
     }
 
+    @Test fun interpretsConnectivityResponsesWithoutTrustingHttpAlone() {
+        assertEquals(
+            AttriloopTestResult(true, "SDK connected — test event received."),
+            Attriloop.interpretTestResponse(
+                200,
+                """{"ok":true,"message":"SDK connected — test event received."}""",
+            ),
+        )
+        assertEquals(
+            AttriloopTestResult(false, "Invalid API key."),
+            Attriloop.interpretTestResponse(401, """{"ok":false,"message":"Invalid API key."}""),
+        )
+        assertFalse(Attriloop.interpretTestResponse(200, """{"ok":false}""").success)
+    }
+
     // ── cappedQueue (cap eviction math) ────────────────────────────────────
 
     @Test fun cappedQueueKeepsNewestDropsOldest() {

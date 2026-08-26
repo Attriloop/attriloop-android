@@ -47,6 +47,11 @@ Attriloop.sendEvent(
 // CUSTOM events require a name (use the dedicated helper):
 Attriloop.sendCustomEvent("share_referral", parameters = mapOf("channel" to "whatsapp"))
 
+// Verify the key/endpoint during setup. Callback runs off the main thread.
+Attriloop.sendTestEvent { result ->
+    Log.d("Attriloop", "${result.success} — ${result.message}")
+}
+
 // Deferred attribution / creator params (resolved a few seconds after first-open):
 val params = Attriloop.getAttributionParams() // mediaSource, campaignName, linkId, …
 // …or be called back the moment it resolves:
