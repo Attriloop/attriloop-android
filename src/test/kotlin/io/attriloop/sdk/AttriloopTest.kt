@@ -11,6 +11,19 @@ import org.junit.Test
 /** Pure-logic unit tests (no Android framework / SharedPreferences — see follow-up). */
 class AttriloopTest {
 
+    @Test fun parsesSharedAndBrandedDeepLinks() {
+        assertEquals(
+            Attriloop.LinkContext("slug", "go.attriloop.com", "token"),
+            Attriloop.deepLinkContext("GO.ATTRILOOP.COM", listOf("l", "token", "slug")),
+        )
+        assertEquals(
+            Attriloop.LinkContext("slug", "go.customer.com", null),
+            Attriloop.deepLinkContext("go.customer.com", listOf("l", "slug")),
+        )
+        assertNull(Attriloop.deepLinkContext("go.attriloop.com", listOf("l")))
+        assertNull(Attriloop.deepLinkContext("go.attriloop.com", listOf("l", "a", "b", "c")))
+    }
+
     // ── CUSTOM guard (A1) ──────────────────────────────────────────────────
 
     @Test fun customWithoutNameIsDroppable() {
@@ -25,6 +38,18 @@ class AttriloopTest {
     @Test fun nonCustomEventsAreNeverDroppable() {
         assertFalse(Attriloop.isDroppableCustom(AttriloopEvent.PURCHASE, null))
         assertFalse(Attriloop.isDroppableCustom(AttriloopEvent.LOGIN, ""))
+    }
+
+    @Test fun sensitiveParamsAreNormalizedAndHashedBeforeQueueing() {
+        val out = Attriloop.sanitizedParameters(
+            mapOf("email" to " USER@example.com ", "phone" to "+34 600-12-34", "currency" to "EUR"),
+        )
+        assertEquals(
+            "b4c9a289323b21a01c3e940f150eb9b8c542587f1abfd8f0e1cc1ffc5e475514",
+            out["email"],
+        )
+        assertEquals(64, (out["phone"] as String).length)
+        assertEquals("EUR", out["currency"])
     }
 
     // ── classifyOutcome ────────────────────────────────────────────────────
@@ -44,6 +69,16 @@ class AttriloopTest {
         assertEquals(Attriloop.Outcome.TRANSIENT, Attriloop.classifyOutcome(429))
         assertEquals(Attriloop.Outcome.TRANSIENT, Attriloop.classifyOutcome(500))
         assertEquals(Attriloop.Outcome.TRANSIENT, Attriloop.classifyOutcome(503))
+        assertEquals(Attriloop.Outcome.TRANSIENT, Attriloop.classifyOutcome(401))
+        assertEquals(Attriloop.Outcome.TRANSIENT, Attriloop.classifyOutcome(403))
+    }
+
+    @Test fun baseUrlRequiresTlsExceptLocalDebug() {
+        assertTrue(Attriloop.isAllowedBaseUrl("https://api.attriloop.com", false))
+        assertFalse(Attriloop.isAllowedBaseUrl("http://api.attriloop.com", true))
+        assertFalse(Attriloop.isAllowedBaseUrl("http://localhost:8787", false))
+        assertTrue(Attriloop.isAllowedBaseUrl("http://localhost:8787", true))
+        assertTrue(Attriloop.isAllowedBaseUrl("http://127.0.0.1:8787", true))
     }
 
     // ── cappedQueue (cap eviction math) ────────────────────────────────────

@@ -12,6 +12,7 @@ import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -62,11 +63,12 @@ object Attriloop {
     private const val QUEUE_KEY = "queue" // persisted offline event buffer
     private const val MAX_QUEUE = 500 // oldest dropped beyond this
     private const val SDK_VERSION = "android/0.1.0"
+    private const val DEFAULT_BASE_URL = "https://api.attriloop.com"
 
     private val io = Executors.newSingleThreadScheduledExecutor()
     private lateinit var prefs: SharedPreferences
     private var apiKey = ""
-    private var baseUrl = "https://edge.attriloop.com"
+    private var baseUrl = DEFAULT_BASE_URL
     private var debug = false
     private var packageName = ""
 
@@ -114,7 +116,8 @@ object Attriloop {
         this.prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         this.apiKey = apiKey
         this.packageName = app.packageName
-        if (baseUrl != null) this.baseUrl = baseUrl.trimEnd('/')
+        this.baseUrl = DEFAULT_BASE_URL
+        if (baseUrl != null && isAllowedBaseUrl(baseUrl, debug)) this.baseUrl = baseUrl.trimEnd('/')
         this.debug = debug
 
         this.attriloopId = prefs.getString(ID_KEY, null) ?: UUID.randomUUID().toString().also {
@@ -169,7 +172,7 @@ object Attriloop {
             .put("eid", UUID.randomUUID().toString()) // idempotency key; backend dedupes retries
             .put("eventTime", eventTime)
         if (name != null) item.put("name", name)
-        if (parameters != null) item.put("parameters", JSONObject(parameters))
+        if (parameters != null) item.put("parameters", JSONObject(sanitizedParameters(parameters)))
         enqueue(item)
         flushQueue()
     }
@@ -183,6 +186,37 @@ object Attriloop {
     /** A CUSTOM event with no usable name can never be ingested. Pure; for tests. */
     internal fun isDroppableCustom(event: AttriloopEvent, name: String?): Boolean =
         event == AttriloopEvent.CUSTOM && name.isNullOrEmpty()
+
+    private val sensitiveParameterKeys = setOf(
+        "email", "name", "phone", "phone_number", "date_of_birth", "dob", "first_name", "last_name",
+    )
+
+    /** Hash advanced-matching identifiers before they reach disk or the network. */
+    internal fun sanitizedParameters(parameters: Map<String, Any?>): Map<String, Any?> {
+        val out = LinkedHashMap<String, Any?>()
+        for ((key, value) in parameters) {
+            if (key.lowercase(Locale.US) !in sensitiveParameterKeys) {
+                out[key] = value
+                continue
+            }
+            val raw = value as? String ?: continue
+            hashedSensitiveValue(raw, key)?.let { out[key] = it }
+        }
+        return out
+    }
+
+    internal fun hashedSensitiveValue(value: String, key: String): String? {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.matches(Regex("^[0-9a-fA-F]{64}$"))) return trimmed.lowercase(Locale.US)
+        val normalized = when (key.lowercase(Locale.US)) {
+            "phone", "phone_number", "date_of_birth", "dob" -> trimmed.filter(Char::isDigit)
+            else -> trimmed.lowercase(Locale.US).split(Regex("\\s+")).joinToString(" ")
+        }
+        if (normalized.isEmpty()) return null
+        return MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
 
     /** Append to the persisted queue (capped — oldest dropped first). Runs on `io`. */
     private fun enqueue(item: JSONObject) {
@@ -305,18 +339,34 @@ object Attriloop {
             fetchAttribution(0)
             return
         }
-        val segments = uri.pathSegments
-        if (segments.size >= 3 && segments[0] == "l") {
-            resolveDeepLink(segments[2])
-        }
+        deepLinkContext(uri.host, uri.pathSegments)?.let(::resolveDeepLink)
     }
 
-    /** Resolve a namespaced App Link's slug to its click id + deep-link value. Runs on `io`. */
-    private fun resolveDeepLink(slug: String) {
+    internal data class LinkContext(val slug: String, val host: String, val token: String?)
+
+    /** Pure parser for branded `/l/<slug>` and shared `/l/<token>/<slug>` links. */
+    internal fun deepLinkContext(host: String?, segments: List<String>): LinkContext? {
+        val normalizedHost = host?.lowercase(Locale.US)?.takeIf { it.isNotBlank() } ?: return null
+        if (segments.size == 2 && segments[0] == "l" && segments[1].isNotEmpty()) {
+            return LinkContext(segments[1], normalizedHost, null)
+        }
+        if (
+            segments.size == 3 && segments[0] == "l" &&
+            segments[1].isNotEmpty() && segments[2].isNotEmpty()
+        ) {
+            return LinkContext(segments[2], normalizedHost, segments[1])
+        }
+        return null
+    }
+
+    /** Resolve an App Link in its host/project namespace. Runs on `io`. */
+    private fun resolveDeepLink(context: LinkContext) {
         if (apiKey.isEmpty()) return
         io.execute {
-            val enc = URLEncoder.encode(slug, "UTF-8")
-            val json = get("/v1/resolve?slug=$enc") ?: return@execute
+            val encSlug = URLEncoder.encode(context.slug, "UTF-8")
+            val encHost = URLEncoder.encode(context.host, "UTF-8")
+            val tokenQuery = context.token?.let { "&token=${URLEncoder.encode(it, "UTF-8")}" } ?: ""
+            val json = get("/v1/resolve?slug=$encSlug&host=$encHost$tokenQuery") ?: return@execute
             json.optString("at_click", "").takeIf { it.isNotEmpty() }?.let {
                 prefs.edit().putString(CLICK_KEY, it).apply()
             }
@@ -390,6 +440,12 @@ object Attriloop {
 
     private fun fetchReferrerThenInstall(context: Context) {
         val client = InstallReferrerClient.newBuilder(context).build()
+        // Some OEM Play Store implementations never invoke the listener. Bound first-
+        // open latency so attribution still sends (without a referrer) after 5 seconds.
+        io.schedule({
+            try { client.endConnection() } catch (_: Exception) {}
+            sendInstall(null)
+        }, 5, TimeUnit.SECONDS)
         client.startConnection(object : InstallReferrerStateListener {
             override fun onInstallReferrerSetupFinished(responseCode: Int) {
                 var referrer: String? = null
@@ -513,8 +569,21 @@ object Attriloop {
     internal fun classifyOutcome(code: Int): Outcome = when {
         code in 200..299 -> Outcome.OK
         code == 408 || code == 429 -> Outcome.TRANSIENT // timeout / rate-limited → retry
+        code == 401 || code == 403 -> Outcome.TRANSIENT // provisioning / key rotation must not drain queue
         code in 400..499 -> Outcome.PERMANENT // 4xx → server will keep rejecting
         else -> Outcome.TRANSIENT // 5xx or unknown
+    }
+
+    /** Never allow an SDK key/event body over plaintext except local debug development. */
+    internal fun isAllowedBaseUrl(value: String, debug: Boolean): Boolean = try {
+        val url = URL(value)
+        when (url.protocol.lowercase(Locale.US)) {
+            "https" -> !url.host.isNullOrBlank()
+            "http" -> debug && (url.host == "localhost" || url.host == "127.0.0.1")
+            else -> false
+        }
+    } catch (_: Exception) {
+        false
     }
 
     /** One POST attempt (no internal retry). Must be called on the `io` thread. */
