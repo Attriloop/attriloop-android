@@ -32,6 +32,7 @@ enum class AttriloopEvent(val raw: String) {
     INITIATE_CHECKOUT("INITIATE_CHECKOUT"),
     START_TRIAL("START_TRIAL"),
     SUBSCRIBE("SUBSCRIBE"),
+    REENGAGEMENT("REENGAGEMENT"), // emitted automatically after an App Link resolves
     LEVEL_START("LEVEL_START"),
     LEVEL_COMPLETE("LEVEL_COMPLETE"),
     TUTORIAL_COMPLETE("TUTORIAL_COMPLETE"),
@@ -158,6 +159,10 @@ object Attriloop {
     @JvmStatic
     @JvmOverloads
     fun sendEvent(event: AttriloopEvent, name: String? = null, parameters: Map<String, Any?>? = null) {
+        if (event == AttriloopEvent.REENGAGEMENT) {
+            if (debug) println("[Attriloop] REENGAGEMENT is emitted automatically — event dropped")
+            return
+        }
         // A CUSTOM event with no name is rejected by the backend (422) and the offline
         // queue would then drop it as a permanent failure — silently losing it. Refuse
         // it here so the mistake is visible in debug. Use sendCustomEvent(name, …).
@@ -185,6 +190,24 @@ object Attriloop {
     @JvmOverloads
     fun sendCustomEvent(name: String, parameters: Map<String, Any?>? = null) =
         sendEvent(AttriloopEvent.CUSTOM, name, parameters)
+
+    /** Credit an installed-app open to its resolve-only click without reassigning the install. */
+    private fun sendReengagement(clickId: String) {
+        val eventTime = synchronized(iso) { iso.format(Date()) }
+        enqueue(
+            JSONObject()
+                .put("attriloopId", attriloopId)
+                .put("appId", packageName)
+                .put("event", AttriloopEvent.REENGAGEMENT.raw)
+                .put("clickId", clickId)
+                .put("eid", reengagementEventId(clickId))
+                .put("eventTime", eventTime),
+        )
+        flushQueue()
+    }
+
+    /** Stable per resolve token so retries/replays never count the same reopen twice. */
+    internal fun reengagementEventId(clickId: String): String = "reengagement:$clickId"
 
     /**
      * Verify that the configured SDK key can reach Attriloop. The callback runs on
@@ -429,6 +452,7 @@ object Attriloop {
             val json = get("/v1/resolve?slug=$encSlug&host=$encHost$tokenQuery") ?: return@execute
             json.optString("at_click", "").takeIf { it.isNotEmpty() }?.let {
                 prefs.edit().putString(CLICK_KEY, it).apply()
+                sendReengagement(it)
             }
             json.optString("deep_link_value", "").takeIf { it.isNotEmpty() }?.let { setDeepLink(it) }
             fetchAttribution(0)

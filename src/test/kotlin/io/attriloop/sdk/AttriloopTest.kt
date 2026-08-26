@@ -35,6 +35,13 @@ class AttriloopTest {
         assertFalse(Attriloop.isDroppableCustom(AttriloopEvent.CUSTOM, "share_referral"))
     }
 
+    @Test fun reengagementEventIdIsStablePerResolveToken() {
+        assertEquals(
+            "reengagement:resolve-click",
+            Attriloop.reengagementEventId("resolve-click"),
+        )
+    }
+
     @Test fun nonCustomEventsAreNeverDroppable() {
         assertFalse(Attriloop.isDroppableCustom(AttriloopEvent.PURCHASE, null))
         assertFalse(Attriloop.isDroppableCustom(AttriloopEvent.LOGIN, ""))
@@ -91,7 +98,7 @@ class AttriloopTest {
         )
         assertEquals(
             AttriloopTestResult(false, "Invalid API key."),
-            Attriloop.interpretTestResponse(401, """{"ok":false,"message":"Invalid API key."}""),
+            Attriloop.interpretTestResponse(401, """{"ok":false,"message":"Invalid API key."}"""),
         )
         assertFalse(Attriloop.interpretTestResponse(200, """{"ok":false}""").success)
     }

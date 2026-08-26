@@ -2,7 +2,14 @@
 
 Kotlin SDK for Attriloop — mobile attribution for influencer/creator links.
 
-## Install (JitPack)
+## Distribution status
+
+The repository and artifact are currently a private beta. The library is tested and
+builds a release AAR, but external customers must not be sent the JitPack coordinate
+until the repository/tag is publicly resolvable (or an authenticated package registry
+is selected).
+
+## Install after public release
 
 Add JitPack to your repositories, then the dependency:
 
@@ -66,7 +73,9 @@ Attriloop.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p[
    backend decodes it to the exact click (deterministic, `match_method = play_referrer`).
 2. If no referrer click id is present, the backend falls back to a coarse
    fingerprint (IP + platform + locale) within the attribution window.
-3. `getAttributionParams()` polls `GET /v1/attribution` until the backend resolves
+3. An App Link opened with the app installed resolves through `/v1/resolve` and emits
+   one automatic reengagement for that link; it never reassigns the install.
+4. `getAttributionParams()` polls `GET /v1/attribution` until the backend resolves
    the install, then caches the result.
 
 ## Parity with iOS
@@ -78,14 +87,15 @@ Event names are identical (`AttriloopEvent`).
 ## Build & test
 
 ```bash
-./gradlew testDebugUnitTest   # unit tests (requires Android SDK + JDK 17)
+./gradlew test                # debug + release unit tests (requires Android SDK + JDK 17)
+./gradlew assembleRelease     # build the release AAR
 ./gradlew publishToMavenLocal # build the AAR locally
 ```
 
 ## Releasing
 
-JitPack builds from a Git tag (config in `jitpack.yml`). Push a tag matching the
-`version` in `build.gradle.kts`:
+JitPack builds from a Git tag (config in `jitpack.yml`). Only after choosing a public
+distribution path, push a tag matching the `version` in `build.gradle.kts`:
 
 ```bash
 git tag 0.1.0 && git push origin 0.1.0
