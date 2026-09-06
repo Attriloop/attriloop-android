@@ -1,12 +1,11 @@
 plugins {
     id("com.android.library") version "8.5.0"
     id("org.jetbrains.kotlin.android") version "1.9.24"
-    id("maven-publish")
+    id("com.vanniktech.maven.publish") version "0.34.0"
 }
 
-// JitPack publishes under the repo owner's group. See README.md.
-group = "com.github.victorgxn"
-version = "0.1.0"
+group = "com.attriloop"
+version = "0.2.0"
 
 android {
     namespace = "io.attriloop.sdk"
@@ -26,13 +25,6 @@ android {
         jvmTarget = "17"
     }
 
-    // Expose a single `release` software component so maven-publish can publish the AAR
-    // (required by AGP 7.1+ before `components["release"]` exists).
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
 dependencies {
@@ -46,15 +38,46 @@ dependencies {
     testImplementation("org.json:json:20240303")
 }
 
-// Publication consumed by JitPack:
-//   implementation("com.github.victorgxn:attriloop-android:<tag>")
-publishing {
-    publications {
-        register<MavenPublication>("release") {
-            groupId = "com.github.victorgxn"
-            artifactId = "attriloop-android"
-            version = "0.1.0"
-            afterEvaluate { from(components["release"]) }
+mavenPublishing {
+    coordinates(project.group.toString(), "attriloop-android", project.version.toString())
+    publishToMavenCentral(automaticRelease = true)
+    // Local Maven smoke tests remain unsigned. The protected release job supplies
+    // the in-memory PGP key, which enables signatures for every Central artifact.
+    if (providers.gradleProperty("signingInMemoryKey").isPresent) {
+        signAllPublications()
+    }
+
+    pom {
+        name.set("Attriloop Android SDK")
+        description.set("Mobile attribution SDK for Attriloop creator and influencer links.")
+        inceptionYear.set("2026")
+        url.set("https://github.com/victorgxn/attriloop-android")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/license/mit")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("victorgxn")
+                name.set("Victor Gonzalez")
+                url.set("https://github.com/victorgxn")
+            }
+        }
+        scm {
+            url.set("https://github.com/victorgxn/attriloop-android")
+            connection.set("scm:git:git://github.com/victorgxn/attriloop-android.git")
+            developerConnection.set("scm:git:ssh://git@github.com/victorgxn/attriloop-android.git")
+        }
+    }
+}
+
+tasks.matching { it.name.contains("MavenCentral", ignoreCase = true) }.configureEach {
+    doFirst {
+        require(providers.gradleProperty("signingInMemoryKey").isPresent) {
+            "Maven Central publication requires signingInMemoryKey"
         }
     }
 }

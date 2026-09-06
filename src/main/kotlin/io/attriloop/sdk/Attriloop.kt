@@ -66,7 +66,7 @@ object Attriloop {
     private const val DEEPLINK_KEY = "deepLink" // last resolved deep_link_value
     private const val QUEUE_KEY = "queue" // persisted offline event buffer
     private const val MAX_QUEUE = 500 // oldest dropped beyond this
-    private const val SDK_VERSION = "android/0.1.0"
+    private const val SDK_VERSION = "android/0.2.0"
     private const val DEFAULT_BASE_URL = "https://api.attriloop.com"
 
     private val io = Executors.newSingleThreadScheduledExecutor()

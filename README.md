@@ -2,29 +2,23 @@
 
 Kotlin SDK for Attriloop — mobile attribution for influencer/creator links.
 
-## Distribution status
+## Installation
 
-The repository and artifact are currently a private beta. The library is tested and
-builds a release AAR, but external customers must not be sent the JitPack coordinate
-until the repository/tag is publicly resolvable (or an authenticated package registry
-is selected).
-
-## Install after public release
-
-Add JitPack to your repositories, then the dependency:
+Release `0.2.0` uses Maven Central. Once the protected release has completed and the
+coordinate resolves publicly, keep `mavenCentral()` in the consumer repositories and
+add the dependency:
 
 ```kotlin
 // settings.gradle.kts
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
-        maven { url = uri("https://jitpack.io") }
     }
 }
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.victorgxn:attriloop-android:0.1.0")
+    implementation("com.attriloop:attriloop-android:0.2.0")
 }
 ```
 
@@ -94,7 +88,7 @@ Event names are identical (`AttriloopEvent`).
 ```bash
 ./gradlew test                # debug + release unit tests (requires Android SDK + JDK 17)
 ./gradlew assembleRelease     # build the release AAR
-./gradlew publishToMavenLocal # build the AAR locally
+./gradlew publishToMavenLocal # unsigned local consumer smoke only
 ```
 
 CI inspects the merged release manifest, so a transitive dependency cannot silently
@@ -103,12 +97,14 @@ the build and forcing a disclosure/consent review.
 
 ## Releasing
 
-JitPack builds from a Git tag (config in `jitpack.yml`). Only after choosing a public
-distribution path, push a tag matching the `version` in `build.gradle.kts`:
+The `v0.2.0` tag starts the protected `maven-central` GitHub environment. After an
+approver reviews the production smoke-test evidence, CI signs and publishes the AAR,
+sources, documentation and POM through Central Portal, then creates the GitHub Release.
+The repository must contain these secrets:
 
-```bash
-git tag 0.1.0 && git push origin 0.1.0
-```
+- `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (Central user token)
+- `SIGNING_KEY` and `SIGNING_PASSWORD` (ASCII-armored PGP private key)
 
-Then the first resolve of `com.github.victorgxn:attriloop-android:0.1.0` triggers the
-JitPack build; confirm it at `https://jitpack.io/#victorgxn/attriloop-android`.
+The `com.attriloop` namespace must already be verified in Central Portal. Published
+Maven Central coordinates are immutable, so never push the release tag before the
+clean-consumer smoke test passes.
