@@ -4,7 +4,7 @@ Kotlin SDK for Attriloop — mobile attribution for influencer/creator links.
 
 ## Installation
 
-Release `0.2.0` uses Maven Central. Once the protected release has completed and the
+Release `0.2.1` uses Maven Central. Once the protected release has completed and the
 coordinate resolves publicly, keep `mavenCentral()` in the consumer repositories and
 add the dependency:
 
@@ -18,7 +18,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.attriloop:attriloop-android:0.2.0")
+    implementation("com.attriloop:attriloop-android:0.2.1")
 }
 ```
 
@@ -30,6 +30,17 @@ It does not declare `AD_ID`, location, contacts, phone or storage permissions. C
 is derived server-side from the request IP, and Android's probabilistic fallback uses a
 one-way fingerprint of IP/platform/locale when no deterministic referrer exists. Review
 the complete [Google Play Data Safety guidance](PRIVACY.md) before publishing a host app.
+
+### Customer user id and automatic opens
+
+```kotlin
+// After your own login: attach your user id to every install/event (persisted).
+Attriloop.setCustomerUserId(user.id)   // pass null on logout
+```
+
+The SDK also emits an automatic `APP_OPEN` event on cold start and on every return
+from background. Do not send it manually; it powers daily active users per link and
+creator in the dashboard and is excluded from your event counts.
 
 ## Usage
 
@@ -77,11 +88,30 @@ Attriloop.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p[
 4. `getAttributionParams()` polls `GET /v1/attribution` until the backend resolves
    the install, then caches the result.
 
+## App Links (open the app if installed)
+
+Forward incoming App Link intents so the click token is captured and the deferred
+destination (`deep_link_value`) is delivered:
+
+```kotlin
+// In your launcher Activity (onCreate + onNewIntent):
+Attriloop.handleDeepLink(intent?.data)
+
+// Route the user once the destination is known (relative, UNTRUSTED route):
+Attriloop.onDeepLink { value -> router.navigate(value) }
+```
+
+The edge serves `/.well-known/assetlinks.json` for the package + signing certificate
+entered in the **Attriloop console → SDK setup**.
+
 ## Parity with iOS
 
-Same public surface as the iOS `AttriloopSDK`: `configure`, `sendEvent`,
-`sendCustomEvent`, `getAttriloopId`, `getAttributionParams` (sync + async callback).
-Event names are identical (`AttriloopEvent`).
+Same public surface as the iOS `AttriloopSDK`: `configure`, `setCustomerUserId`,
+`sendEvent`, `sendCustomEvent`, `sendTestEvent`, `flushQueue`, `getAttriloopId`,
+`getAttributionParams` (sync + async callback), `handleDeepLink`, `getDeepLink`,
+`onDeepLink`. Event names are identical (`AttriloopEvent`). Differences: Android adds
+the Play Install Referrer (deterministic) and a coarse fingerprint fallback; iOS adds
+AdServices, SKAdNetwork and AdAttributionKit.
 
 ## Build & test
 
@@ -97,7 +127,7 @@ the build and forcing a disclosure/consent review.
 
 ## Releasing
 
-The `v0.2.0` tag starts the protected `maven-central` GitHub environment. After an
+The `v0.2.1` tag starts the protected `maven-central` GitHub environment. After an
 approver reviews the production smoke-test evidence, CI signs and publishes the AAR,
 sources, documentation and POM through Central Portal, then creates the GitHub Release.
 The repository must contain these secrets:
