@@ -185,7 +185,7 @@ object Attriloop {
     /**
      * Attach the host app's own user id to every install/event from now on (and persist
      * it across launches). Lets the customer join Attriloop installs with their users and
-     * with RevenueCat/Adapty without manual reconciliation. Pass null to clear. Values are
+     * with RevenueCat without manual reconciliation. Pass null to clear. Values are
      * trimmed and capped at 128 characters; never pass an email or phone here — use the
      * hashed advanced-matching parameters on sendEvent for that.
      */
