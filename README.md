@@ -64,7 +64,7 @@ Attriloop.sendEvent(
 // CUSTOM events require a name (use the dedicated helper):
 Attriloop.sendCustomEvent("share_referral", parameters = mapOf("channel" to "whatsapp"))
 
-// Verify the key/endpoint during setup. Callback runs off the main thread.
+// Verify the key/endpoint during setup. Callback runs on the main thread.
 Attriloop.sendTestEvent { result ->
     Log.d("Attriloop", "${result.success} — ${result.message}")
 }
@@ -109,16 +109,18 @@ entered in the **Attriloop console → SDK setup**.
 Same public surface as the iOS `AttriloopSDK`: `configure`, `setCustomerUserId`,
 `sendEvent`, `sendCustomEvent`, `sendTestEvent`, `flushQueue`, `getAttriloopId`,
 `getAttributionParams` (sync + async callback), `handleDeepLink`, `getDeepLink`,
-`onDeepLink`. Event names are identical (`AttriloopEvent`). Differences: Android adds
-the Play Install Referrer (deterministic) and a coarse fingerprint fallback; iOS adds
-AdServices, SKAdNetwork and AdAttributionKit.
+`onDeepLink`. Event names are identical (`AttriloopEvent`). Host callbacks
+(`onDeepLink`, `getAttributionParams`, `sendTestEvent`) run on the main thread.
+Differences: Android adds the Play Install Referrer (deterministic) and a coarse
+fingerprint fallback; iOS adds AdServices, SKAdNetwork and AdAttributionKit.
 
 ## Build & test
 
 ```bash
 ./gradlew test                # debug + release unit tests (requires Android SDK + JDK 17)
 ./gradlew assembleRelease     # build the release AAR
-./gradlew publishToMavenLocal # unsigned local consumer smoke only
+./gradlew -p IntegrationTests/GradleConsumer test  # clean-consumer public API smoke
+./gradlew publishToMavenLocal # unsigned local Maven smoke only
 ```
 
 CI inspects the merged release manifest, so a transitive dependency cannot silently

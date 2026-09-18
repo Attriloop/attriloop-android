@@ -8,7 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Pure-logic unit tests (no Android framework / SharedPreferences — see follow-up). */
+/** Pure-logic unit tests. Persistence + main-thread delivery: [AttriloopPersistenceTest]. */
 class AttriloopTest {
     @Test fun parsesReadableSharedAndBrandedLinks() {
         for (path in listOf(listOf("faithlocked", "dxrling3x"), listOf("faithlocked--dxrling3x"))) {
@@ -112,6 +112,25 @@ class AttriloopTest {
             Attriloop.interpretTestResponse(401, """{"ok":false,"message":"Invalid API key."}"""),
         )
         assertFalse(Attriloop.interpretTestResponse(200, """{"ok":false}""").success)
+        assertEquals(
+            "This key cannot send SDK events.",
+            Attriloop.interpretTestResponse(403, null).message,
+        )
+        assertTrue(Attriloop.interpretTestResponse(429, null).message.contains("Rate limited"))
+        assertTrue(Attriloop.interpretTestResponse(500, null).message.contains("HTTP 500"))
+    }
+
+    @Test fun testEventBodyAlwaysHasSubjectFields() {
+        val body = Attriloop.testEventBody()
+        assertTrue(body.has("attriloopId"))
+        assertTrue(body.has("appId"))
+    }
+
+    @Test fun sendEventBeforeConfigureIsIgnored() {
+        Attriloop.sendEvent(AttriloopEvent.LOGIN)
+        Attriloop.flushQueue()
+        Attriloop.setCustomerUserId("should-not-persist")
+        assertNull(Attriloop.persistedCustomerUserId())
     }
 
     // ── cappedQueue (cap eviction math) ────────────────────────────────────

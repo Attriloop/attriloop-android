@@ -25,6 +25,11 @@ android {
         jvmTarget = "17"
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -36,6 +41,8 @@ dependencies {
     // unit tests, so pull the real implementation onto the test classpath.
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
 }
 
 mavenPublishing {

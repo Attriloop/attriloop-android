@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 import org.json.JSONArray
@@ -328,13 +330,13 @@ object Attriloop {
 
     /**
      * Verify that the configured SDK key can reach Attriloop. The callback runs on
-     * the SDK background executor; dispatch to the main thread before updating UI.
-     * A successful response also stamps the app as connected in the dashboard.
+     * the main thread so setup screens can update UI directly. A successful response
+     * also stamps the app as connected in the dashboard.
      */
     @JvmStatic
     fun sendTestEvent(callback: (AttriloopTestResult) -> Unit) {
         if (apiKey.isBlank()) {
-            callback(AttriloopTestResult(false, "Call configure() before sendTestEvent()."))
+            dispatchToMain { callback(AttriloopTestResult(false, "Call configure() before sendTestEvent().")) }
             return
         }
         io.execute {
@@ -342,7 +344,7 @@ object Attriloop {
                 withConnection("/v1/test", "POST") { conn ->
                     conn.doOutput = true
                     conn.setRequestProperty("Content-Type", "application/json")
-                    conn.outputStream.use { it.write("{}".toByteArray()) }
+                    conn.outputStream.use { it.write(testEventBody().toString().toByteArray()) }
                     val code = conn.responseCode
                     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
                     interpretTestResponse(code, stream?.let(::readBounded))
@@ -351,13 +353,14 @@ object Attriloop {
                 if (debug) e.printStackTrace()
                 AttriloopTestResult(false, "Couldn't reach Attriloop. Check the endpoint and network.")
             }
-            try {
-                callback(result)
-            } catch (e: Exception) {
-                if (debug) e.printStackTrace()
-            }
+            dispatchToMain { callback(result) }
         }
     }
+
+    /** Body of `POST /v1/test` — same subject fields iOS sends. Pure; for tests. */
+    internal fun testEventBody(): JSONObject = JSONObject()
+        .put("attriloopId", attriloopId)
+        .put("appId", packageName)
 
     /** Convert the connectivity endpoint response to the stable public result. */
     internal fun interpretTestResponse(code: Int, body: String?): AttriloopTestResult {
@@ -507,9 +510,9 @@ object Attriloop {
         sendNextQueued()
     }
 
-    /** True once configure() ran. Logs in debug so the integration mistake is visible. */
+    /** True once configure() ran with a non-empty key. Logs in debug so the integration mistake is visible. */
     private fun isConfigured(caller: String): Boolean {
-        if (::prefs.isInitialized) return true
+        if (::prefs.isInitialized && apiKey.isNotEmpty()) return true
         if (debug) println("[Attriloop] $caller called before configure() — ignored")
         return false
     }
@@ -685,14 +688,15 @@ object Attriloop {
     fun getAttributionParams(): Map<String, Any?> = attribution
 
     /**
-     * Async variant: invokes [callback] with the resolved params (or the current cache
-     * if already resolved). Always fires — even if attribution never resolves it is
-     * eventually called with whatever is cached. Mirrors the iOS completion API.
+     * Async variant: invokes [callback] on the main thread with the resolved params
+     * (or the current cache if already resolved). Always fires — even if attribution
+     * never resolves it is eventually called with whatever is cached. Mirrors the iOS
+     * completion API (`DispatchQueue.main`).
      */
     @JvmStatic
     fun getAttributionParams(callback: (Map<String, Any?>) -> Unit) {
         if (attribution.isNotEmpty()) {
-            callback(attribution)
+            dispatchToMain { callback(attribution) }
             return
         }
         synchronized(handlers) { handlers.add(callback) }
@@ -708,16 +712,33 @@ object Attriloop {
             pending = ArrayList(handlers)
             handlers.clear()
         }
-        pending.forEach { invokeSafely { it(result) } }
+        pending.forEach { callback -> dispatchToMain { callback(result) } }
     }
 
-    /** Host callbacks run on the SDK thread; an exception there must not kill the app. */
+    /** Host callbacks must not kill the app; iOS delivers these on the main queue. */
     private inline fun invokeSafely(block: () -> Unit) {
         try {
             block()
         } catch (e: Exception) {
             if (debug) e.printStackTrace()
         }
+    }
+
+    /**
+     * Post to the main looper (always async, matching iOS `DispatchQueue.main.async`).
+     * On a JVM unit-test classpath without a looper, run inline so pure tests stay hermetic.
+     */
+    private fun dispatchToMain(block: () -> Unit) {
+        val looper = try {
+            Looper.getMainLooper()
+        } catch (_: Throwable) {
+            null
+        }
+        if (looper == null) {
+            invokeSafely(block)
+            return
+        }
+        Handler(looper).post { invokeSafely(block) }
     }
 
     // ── deep links ───────────────────────────────────────────────────────────
@@ -730,7 +751,7 @@ object Attriloop {
      */
     @JvmStatic
     fun handleDeepLink(uri: Uri?) {
-        if (uri == null || !::prefs.isInitialized) return // configure() must run first
+        if (uri == null || !isConfigured("handleDeepLink")) return
         val click = uri.getQueryParameter("at_click")
         if (!click.isNullOrEmpty()) {
             prefs.edit().putString(CLICK_KEY, click).apply()
@@ -823,7 +844,7 @@ object Attriloop {
             pending = ArrayList(deepLinkHandlers)
             deepLinkPending = false // consumed — this resolution won't be delivered again
         }
-        pending.forEach { invokeSafely { it(value) } }
+        pending.forEach { callback -> dispatchToMain { callback(value) } }
     }
 
     /** The last resolved deferred deep-link destination (`deep_link_value`), or null. */
@@ -836,8 +857,7 @@ object Attriloop {
      * is already pending it fires immediately; a value merely restored from a previous
      * launch does NOT fire (once-only semantics — see the note on deepLinkPending), so
      * the destination is never re-navigated on an organic launch. Callbacks run on the
-     * SDK's background thread — dispatch to the main thread before touching UI. Treat the
-     * value as UNTRUSTED input when routing.
+     * main thread (matching iOS). Treat the value as UNTRUSTED input when routing.
      */
     @JvmStatic
     fun onDeepLink(callback: (String) -> Unit) {
@@ -1140,5 +1160,81 @@ object Attriloop {
             map[key] = if (v == JSONObject.NULL) null else v
         }
         return map
+    }
+
+    // ── test seams (mirrors iOS injecting an isolated UserDefaults suite) ──
+
+    /** Drain the SDK executor so tests can observe persisted writes. */
+    internal fun awaitIo() {
+        io.submit { }.get(5, TimeUnit.SECONDS)
+    }
+
+    /** Init prefs + identity without Play Referrer, polling, or network. */
+    internal fun attachPersistenceForTest(context: Context) {
+        resetForTest()
+        val app = context.applicationContext
+        prefs = app.getSharedPreferences("$PREFS.test", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        apiKey = "at_test"
+        debug = true
+        packageName = app.packageName
+        attriloopId = "test-attriloop-id"
+        prefs.edit().putString(ID_KEY, attriloopId).commit()
+    }
+
+    /** Drop in-memory + on-disk SDK state so later tests (and the pure JVM suite) stay isolated. */
+    internal fun resetForTest() {
+        try {
+            awaitIo()
+        } catch (_: Exception) {
+            // Executor may be idle; isolation still proceeds.
+        }
+        apiKey = ""
+        debug = false
+        baseUrl = DEFAULT_BASE_URL
+        packageName = ""
+        attriloopId = ""
+        customerUserId = null
+        attribution = emptyMap()
+        synchronized(handlers) { handlers.clear() }
+        deepLink = null
+        deepLinkPending = false
+        synchronized(deepLinkHandlers) { deepLinkHandlers.clear() }
+        installSent.set(false)
+        polling.set(false)
+        referrerUpdateClaimed.set(false)
+        pendingReferrerUpdate = null
+        flushing.set(false)
+        batchUnsupported = false
+        if (::prefs.isInitialized) prefs.edit().clear().commit()
+    }
+
+    internal fun persistedCustomerUserId(): String? =
+        if (::prefs.isInitialized) prefs.getString(CUSTOMER_USER_ID_KEY, null) else null
+
+    internal fun enqueueForTest(item: JSONObject) {
+        enqueue(item)
+        awaitIo()
+    }
+
+    internal fun queuedEidsForTest(): List<String> {
+        val arr = readQueue()
+        return (0 until arr.length()).mapNotNull { i ->
+            arr.optJSONObject(i)?.optString("eid")?.takeIf { it.isNotEmpty() }
+        }
+    }
+
+    internal fun removeQueuedForTest(eids: Set<String>) {
+        io.submit { removeQueued(eids) }.get(5, TimeUnit.SECONDS)
+    }
+
+    internal fun setAttributionForTest(value: Map<String, Any?>) {
+        attribution = value
+    }
+
+    internal fun setDeepLinkForTest(value: String, pending: Boolean) {
+        deepLink = value
+        deepLinkPending = pending
+        if (::prefs.isInitialized) prefs.edit().putString(DEEPLINK_KEY, value).apply()
     }
 }
