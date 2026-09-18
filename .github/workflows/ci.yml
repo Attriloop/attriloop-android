@@ -1,0 +1,48 @@
+name: Android SDK CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-sdk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Verify merged-manifest privacy contract
+        run: |
+          ./gradlew processReleaseManifest
+          manifest=build/intermediates/merged_manifest/release/processReleaseManifest/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' "$manifest"
+          if grep -Eq 'ACCESS_(COARSE|FINE|BACKGROUND)_LOCATION|permission.AD_ID|READ_PHONE_STATE|READ_CONTACTS|READ_EXTERNAL_STORAGE' "$manifest"; then
+            echo "A sensitive permission entered the release manifest; update code, disclosure and consent before shipping."
+            exit 1
+          fi
+
+      - name: Run unit tests
+        run: ./gradlew test
+
+      - name: Android lint
+        run: ./gradlew lint
+
+      - name: Build release AAR
+        run: ./gradlew assembleRelease
