@@ -66,10 +66,12 @@ object Attriloop {
     private const val ID_KEY = "attriloop_id"
     private const val INSTALLED_KEY = "installed"
     private const val ATTR_KEY = "attribution"
+    private const val MATCH_STATUS_KEY = "matchStatus"
     private const val CLICK_KEY = "clickId" // at_click captured from a deep link
     private const val DEEPLINK_KEY = "deepLink" // last resolved deep_link_value
     private const val QUEUE_KEY = "queue" // persisted offline event buffer
     private const val REFERRER_SENT_KEY = "referrerSent" // Play referrer delivered (with the install or as referrer_update)
+    private const val PLAY_REFERRER_KEY = "playInstallReferrer" // raw Play Install Referrer string, read-only to the host
     private const val CUSTOMER_USER_ID_KEY = "customerUserId" // host app's own user id, attached to every request
     private const val CUSTOMER_USER_ID_MAX = 128
     private const val MAX_QUEUE = 500 // oldest dropped beyond this
@@ -99,9 +101,19 @@ object Attriloop {
 
     @Volatile
     private var attribution: Map<String, Any?> = emptyMap()
+    @Volatile
+    private var matchStatus: AttriloopMatchStatus = AttriloopMatchStatus.skipped
+    /** Last non-empty string Play returned. Null until then. Never a host-supplied value. */
+    @Volatile
+    private var playInstallReferrer: String? = null
+    @Volatile
+    private var pollHeardPending = false
+    @Volatile
+    private var pollTransportFailed = false
 
     // Async attribution waiters, flushed once the poll chain resolves or gives up.
     private val handlers = ArrayList<(Map<String, Any?>) -> Unit>()
+    private val attributionHandlers = ArrayList<(AttriloopAttribution) -> Unit>()
 
     // Deferred deep-link destination (`deep_link_value`) + its subscribers.
     //
@@ -128,9 +140,14 @@ object Attriloop {
     // A late Play referrer that arrived while the fallback install POST was still in
     // flight; sent as referrer_update once that install is acknowledged.
     @Volatile
-    private var pendingReferrerUpdate: String? = null
+    private var pendingReferrerUpdate: PlayReferrerHandoff? = null
 
-    /** Public install/device id — the attribution subject. */
+    /**
+     * Public install id. The host sets RevenueCat custom subscriber attribute
+     * `attriloopId` from this value **before the paywall**. This SDK does not
+     * depend on RevenueCat — the host wires the two. Skipping that attribute
+     * records the purchase and does not pay the creator.
+     */
     @JvmStatic
     var attriloopId: String = ""
         private set
@@ -166,11 +183,17 @@ object Attriloop {
                 if (debug) e.printStackTrace()
             }
         }
+        matchStatus = AttriloopMatchStatus.restored(
+            configured = apiKey.isNotEmpty(),
+            persisted = prefs.getString(MATCH_STATUS_KEY, null),
+            params = attribution,
+        )
         // Reload the last persisted deep_link_value for getDeepLink() reads, but leave
         // it NOT pending: a value from a previous launch is already-consumed and must
         // not re-fire onDeepLink (see the once-only note on deepLinkPending).
         deepLink = prefs.getString(DEEPLINK_KEY, null)
         customerUserId = prefs.getString(CUSTOMER_USER_ID_KEY, null)
+        restorePlayInstallReferrerFromPrefs()
         registerForegroundTracking(app)
 
         // INSTALLED_KEY is committed only after the install POST succeeds (sendInstall),
@@ -205,6 +228,81 @@ object Attriloop {
     internal fun normalizeCustomerUserId(id: String?): String? {
         val trimmed = id?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         return if (trimmed.length > CUSTOMER_USER_ID_MAX) trimmed.substring(0, CUSTOMER_USER_ID_MAX) else trimmed
+    }
+
+    /** Spoken alphabet. Same as `@attriloop/core` — no confusable mapping. */
+    internal const val REFERRAL_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    private const val REFERRAL_CODE_LENGTH = 6
+
+    /**
+     * Submit a creator referral code the user typed or heard. The edge upgrades an
+     * unattributed or organic install when the claim is valid. Empty or malformed
+     * input is ignored and never sent. Does not persist the code locally —
+     * console regeneration is the kill switch for a leaked printed code.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun claimReferralCode(code: String, callback: ((Boolean) -> Unit)? = null) {
+        if (!isConfigured("claimReferralCode")) {
+            dispatchToMain { callback?.invoke(false) }
+            return
+        }
+        val normalized = normalizeReferralCode(code)
+        if (normalized == null) {
+            dispatchToMain { callback?.invoke(false) }
+            return
+        }
+        claimReferralCodeAttempt(normalized, 3, callback)
+    }
+
+    /** NFKC, strip whitespace/hyphens, uppercase, allowlist. Pure; for tests. */
+    internal fun normalizeReferralCode(raw: String): String? {
+        val folded = java.text.Normalizer.normalize(raw, java.text.Normalizer.Form.NFKC)
+            .uppercase(Locale.US)
+        val compact = buildString {
+            for (ch in folded) {
+                if (ch.isWhitespace() || ch == '-') continue
+                append(ch)
+            }
+        }
+        if (compact.length != REFERRAL_CODE_LENGTH) return null
+        if (compact.any { it !in REFERRAL_CODE_ALPHABET }) return null
+        return compact
+    }
+
+    private fun claimReferralCodeAttempt(
+        code: String,
+        remaining: Int,
+        callback: ((Boolean) -> Unit)?,
+    ) {
+        io.execute {
+            val body = JSONObject()
+                .put("attriloopId", attriloopId)
+                .put("code", code)
+            val response = postForResponse("/v1/referral-claim", body)
+            if (response != null && response.code in 200..299) {
+                dispatchToMain { callback?.invoke(true) }
+                return@execute
+            }
+            if (response?.code == 404 && remaining > 0 && referralClaimError(response.body) == "install_not_found") {
+                io.schedule(
+                    { claimReferralCodeAttempt(code, remaining - 1, callback) },
+                    1000,
+                    TimeUnit.MILLISECONDS,
+                )
+                return@execute
+            }
+            dispatchToMain { callback?.invoke(false) }
+        }
+    }
+
+    internal fun referralClaimError(body: String?): String? {
+        if (body.isNullOrEmpty()) return null
+        return try {
+            JSONObject(body).optString("error").takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** Add `customerUserId` to an outgoing body when the host has set one. */
@@ -469,12 +567,13 @@ object Attriloop {
             // Android's org.json returns null from toString() when any value is NaN /
             // Infinity; putString(key, null) would then ERASE the whole queue. Parameters
             // are sanitized upstream, but never let a serialization failure wipe it.
-            val serialized = out.toString() ?: run {
+            val serialized: String? = out.toString()
+            val persisted = serialized ?: run {
                 if (debug) println("[Attriloop] queue serialization failed — event dropped, queue kept")
                 arr.remove(arr.length() - 1)
                 cappedQueue(arr, MAX_QUEUE).toString()
             }
-            if (serialized != null) prefs.edit().putString(QUEUE_KEY, serialized).apply()
+            prefs.edit().putString(QUEUE_KEY, persisted).apply()
         }
     }
 
@@ -683,36 +782,88 @@ object Attriloop {
     // Note: `attriloopId` (a @JvmStatic property) already exposes `getAttriloopId()` to
     // Java via its generated getter — a separate fun would clash on the JVM signature.
 
-    /** Resolved attribution params (mediaSource, campaignName, linkId, …); empty until resolved. */
+    /** Resolved attribution params (mediaSource, campaignName, linkId, …); empty until resolved.
+     *  An empty map is **not** organic; read [getMatchStatus] for why it is empty. */
     @JvmStatic
     fun getAttributionParams(): Map<String, Any?> = attribution
+
+    /** Current decision lifecycle. `pending` until the server answers; never inferred as organic. */
+    @JvmStatic
+    fun getMatchStatus(): AttriloopMatchStatus = matchStatus
+
+    /**
+     * Raw Google Play Install Referrer string this process last received from Play, or
+     * null if Play has not returned one (sideload, empty referrer, timeout). Same bytes
+     * posted as `installReferrer` on `/v1/install`. Not a new signal. There is no setter:
+     * a host-supplied string that disagrees with Play is a second source of truth, and
+     * this SDK does not pick a winner.
+     */
+    @JvmStatic
+    fun getPlayInstallReferrer(): String? = playInstallReferrer
 
     /**
      * Async variant: invokes [callback] on the main thread with the resolved params
      * (or the current cache if already resolved). Always fires — even if attribution
      * never resolves it is eventually called with whatever is cached. Mirrors the iOS
-     * completion API (`DispatchQueue.main`).
+     * completion API (`DispatchQueue.main`). Not configured → fires immediately with `emptyMap()`.
      */
     @JvmStatic
     fun getAttributionParams(callback: (Map<String, Any?>) -> Unit) {
-        if (attribution.isNotEmpty()) {
-            dispatchToMain { callback(attribution) }
+        if (apiKey.isEmpty()) {
+            matchStatus = AttriloopMatchStatus.skipped
+            dispatchToMain { callback(emptyMap()) }
+            return
+        }
+        if (shouldDeliverAttribution()) {
+            val snapshot = attribution
+            dispatchToMain { callback(snapshot) }
             return
         }
         synchronized(handlers) { handlers.add(callback) }
-        // Re-check: the poll chain may have resolved between the first check and adding
-        // the handler — flush now so the callback can't hang. Otherwise ensure a poll runs.
-        if (attribution.isNotEmpty()) flushHandlers(attribution) else fetchAttribution(0)
+        if (shouldDeliverAttribution()) flushHandlers() else fetchAttribution(0)
     }
 
-    private fun flushHandlers(result: Map<String, Any?>) {
-        val pending: List<(Map<String, Any?>) -> Unit>
-        synchronized(handlers) {
-            if (handlers.isEmpty()) return
-            pending = ArrayList(handlers)
-            handlers.clear()
+    /** Status plus params, same delivery schedule as [getAttributionParams]. */
+    @JvmStatic
+    fun getAttribution(callback: (AttriloopAttribution) -> Unit) {
+        if (apiKey.isEmpty()) {
+            matchStatus = AttriloopMatchStatus.skipped
+            dispatchToMain { callback(AttriloopAttribution(AttriloopMatchStatus.skipped, emptyMap())) }
+            return
         }
-        pending.forEach { callback -> dispatchToMain { callback(result) } }
+        if (shouldDeliverAttribution()) {
+            val snapshot = AttriloopAttribution(matchStatus, attribution)
+            dispatchToMain { callback(snapshot) }
+            return
+        }
+        synchronized(attributionHandlers) { attributionHandlers.add(callback) }
+        if (shouldDeliverAttribution()) flushHandlers() else fetchAttribution(0)
+    }
+
+    private fun shouldDeliverAttribution(): Boolean = when (matchStatus) {
+        AttriloopMatchStatus.matched,
+        AttriloopMatchStatus.organic,
+        AttriloopMatchStatus.ambiguous,
+        AttriloopMatchStatus.failed,
+        AttriloopMatchStatus.skipped,
+        -> true
+        AttriloopMatchStatus.pending -> false
+    }
+
+    private fun flushHandlers() {
+        val params = attribution
+        val result = AttriloopAttribution(matchStatus, params)
+        val paramWaiters: List<(Map<String, Any?>) -> Unit>
+        val statusWaiters: List<(AttriloopAttribution) -> Unit>
+        synchronized(handlers) {
+            paramWaiters = if (handlers.isEmpty()) emptyList() else ArrayList(handlers).also { handlers.clear() }
+        }
+        synchronized(attributionHandlers) {
+            statusWaiters = if (attributionHandlers.isEmpty()) emptyList() else ArrayList(attributionHandlers).also { attributionHandlers.clear() }
+        }
+        if (paramWaiters.isEmpty() && statusWaiters.isEmpty()) return
+        paramWaiters.forEach { callback -> dispatchToMain { callback(params) } }
+        statusWaiters.forEach { callback -> dispatchToMain { callback(result) } }
     }
 
     /** Host callbacks must not kill the app; iOS delivers these on the main queue. */
@@ -880,10 +1031,21 @@ object Attriloop {
         }, REFERRER_FALLBACK_SECONDS, TimeUnit.SECONDS)
         client.startConnection(object : InstallReferrerStateListener {
             override fun onInstallReferrerSetupFinished(responseCode: Int) {
-                var referrer: String? = null
+                var handoff: PlayReferrerHandoff? = null
                 if (responseCode == InstallReferrerClient.InstallReferrerResponse.OK) {
                     try {
-                        referrer = client.installReferrer.installReferrer
+                        val details = client.installReferrer
+                        val referrer = details.installReferrer
+                        if (!referrer.isNullOrEmpty()) {
+                            // Live ReferrerDetails: only these four getters exist.
+                            // Server-side timestamp methods are not on the reference.
+                            handoff = PlayReferrerHandoff(
+                                referrer,
+                                details.referrerClickTimestampSeconds,
+                                details.installBeginTimestampSeconds,
+                            )
+                            rememberPlayInstallReferrer(referrer)
+                        }
                     } catch (e: Exception) {
                         if (debug) e.printStackTrace()
                     }
@@ -894,7 +1056,7 @@ object Attriloop {
                 }
                 // Before the fallback: single install carrying the referrer (unchanged).
                 // After it: the fallback already claimed the one-shot install → upgrade it.
-                if (!sendInstall(referrer)) sendReferrerUpdateIfLate(referrer)
+                if (!sendInstall(handoff)) sendReferrerUpdateIfLate(handoff)
             }
 
             override fun onInstallReferrerServiceDisconnected() {
@@ -905,8 +1067,38 @@ object Attriloop {
         })
     }
 
+    /** Cache the Play-supplied string for [getPlayInstallReferrer]. Empty is forgotten. */
+    private fun rememberPlayInstallReferrer(value: String?) {
+        val stored = value?.takeIf { it.isNotEmpty() }
+        playInstallReferrer = stored
+        if (::prefs.isInitialized) {
+            prefs.edit().apply {
+                if (stored == null) remove(PLAY_REFERRER_KEY) else putString(PLAY_REFERRER_KEY, stored)
+            }.apply()
+        }
+    }
+
+    private fun restorePlayInstallReferrerFromPrefs() {
+        playInstallReferrer = if (::prefs.isInitialized) {
+            prefs.getString(PLAY_REFERRER_KEY, null)?.takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+    }
+
+    /** Play Referrer string + the two documented ReferrerDetails clocks. */
+    internal data class PlayReferrerHandoff(
+        val referrer: String,
+        val referrerClickTimestampSeconds: Long = 0,
+        val installBeginTimestampSeconds: Long = 0,
+    )
+
+    /** Play reports 0 when a clock is unknown; omit those fields from the wire. */
+    internal fun playTimestampOrNull(seconds: Long): Long? =
+        if (seconds > 0) seconds else null
+
     /** Common `/v1/install` body; [installType] is `new_install` or `referrer_update`. */
-    private fun installBody(referrer: String?, installType: String): JSONObject {
+    private fun installBody(handoff: PlayReferrerHandoff?, installType: String): JSONObject {
         val device = JSONObject()
             .put("os", "android")
             .put("osVersion", Build.VERSION.RELEASE ?: "")
@@ -920,7 +1112,15 @@ object Attriloop {
             .put("sdkVersion", SDK_VERSION)
             .put("installType", installType)
             .withCustomerUserId()
-        if (!referrer.isNullOrEmpty()) body.put("installReferrer", referrer)
+        if (handoff != null && handoff.referrer.isNotEmpty()) {
+            body.put("installReferrer", handoff.referrer)
+            playTimestampOrNull(handoff.referrerClickTimestampSeconds)?.let {
+                body.put("referrerClickTimestampSeconds", it)
+            }
+            playTimestampOrNull(handoff.installBeginTimestampSeconds)?.let {
+                body.put("installBeginTimestampSeconds", it)
+            }
+        }
         // Deterministic click id from an App Link opened before install (if any). The
         // Play referrer above is the primary signal; this covers a pre-install app-link tap.
         prefs.getString(CLICK_KEY, null)?.let { if (it.isNotEmpty()) body.put("clickId", it) }
@@ -928,10 +1128,10 @@ object Attriloop {
     }
 
     /** Send the one-shot install. Returns false when another caller already claimed it. */
-    private fun sendInstall(referrer: String?): Boolean {
+    private fun sendInstall(handoff: PlayReferrerHandoff?): Boolean {
         if (!installSent.compareAndSet(false, true)) return false // exactly once across callbacks
-        val hasReferrer = !referrer.isNullOrEmpty()
-        val body = installBody(referrer, "new_install")
+        val hasReferrer = handoff != null && handoff.referrer.isNotEmpty()
+        val body = installBody(handoff, "new_install")
         postWithResult("/v1/install", body, 0) { ok ->
             if (ok) {
                 prefs.edit().putBoolean(INSTALLED_KEY, true).apply()
@@ -963,17 +1163,17 @@ object Attriloop {
         installAlreadySent && !referrer.isNullOrEmpty() && !referrerAlreadySent
 
     /** Listener path when the fallback install already claimed the one-shot send. */
-    private fun sendReferrerUpdateIfLate(referrer: String?) {
+    private fun sendReferrerUpdateIfLate(handoff: PlayReferrerHandoff?) {
         val needed = referrerUpdateNeeded(
             installAlreadySent = installSent.get(),
-            referrer = referrer,
+            referrer = handoff?.referrer,
             referrerAlreadySent = prefs.getBoolean(REFERRER_SENT_KEY, false),
         )
-        if (!needed || referrer == null || !referrerUpdateClaimed.compareAndSet(false, true)) return
+        if (!needed || handoff == null || !referrerUpdateClaimed.compareAndSet(false, true)) return
         if (prefs.getBoolean(INSTALLED_KEY, false)) {
-            sendReferrerUpdate(referrer)
+            sendReferrerUpdate(handoff)
         } else {
-            pendingReferrerUpdate = referrer // sent from sendInstall once the install lands
+            pendingReferrerUpdate = handoff // sent from sendInstall once the install lands
         }
     }
 
@@ -983,8 +1183,8 @@ object Attriloop {
      * Play referrer match. Same retry/backoff as the install; REFERRER_SENT_KEY is
      * committed only once it lands, so it is sent at most once per install.
      */
-    private fun sendReferrerUpdate(referrer: String) {
-        val body = installBody(referrer, "referrer_update")
+    private fun sendReferrerUpdate(handoff: PlayReferrerHandoff) {
+        val body = installBody(handoff, "referrer_update")
         postWithResult("/v1/install", body, 0) { ok ->
             if (ok) {
                 prefs.edit().putBoolean(REFERRER_SENT_KEY, true).apply()
@@ -997,34 +1197,61 @@ object Attriloop {
 
     /** Poll until attribution resolves (it runs async on the backend), backing off. */
     private fun fetchAttribution(attempt: Int) {
-        if (attriloopId.isEmpty()) return
+        if (apiKey.isEmpty() || attriloopId.isEmpty()) {
+            if (apiKey.isEmpty()) matchStatus = AttriloopMatchStatus.skipped
+            return
+        }
         if (attempt == 0 && !polling.compareAndSet(false, true)) return // a chain already runs
+        if (attempt == 0) {
+            pollHeardPending = false
+            pollTransportFailed = false
+        }
         val delays = longArrayOf(2000, 4000, 8000, 16000)
         io.execute {
             val enc = URLEncoder.encode(attriloopId, "UTF-8")
             val json = get("/v1/attribution?attriloopId=$enc")
-            val status = json?.optString("status", "pending")
-            if (json != null && status != "pending") {
-                attribution = jsonToMap(json)
-                prefs.edit().putString(ATTR_KEY, json.toString()).apply()
-                polling.set(false)
-                // Deferred deep link: surface deep_link_value for navigation ONLY on a
-                // trustworthy match (deterministic rung or high confidence) so a
-                // low-confidence fingerprint guess doesn't misroute the user.
-                val dlv = json.optString("deep_link_value", "")
-                if (dlv.isNotEmpty() && dlv != deepLink) {
-                    val method = json.optString("matchMethod", "")
-                    val deterministic = method == "deeplink" || method == "play_referrer"
-                    if (deterministic || json.optString("confidence", "") == "high") setDeepLink(dlv)
+            if (json != null) {
+                val (status, keepPolling) = AttriloopMatchStatus.interpret(
+                    json.optString("matchStatus").takeIf { json.has("matchStatus") && it.isNotEmpty() },
+                    if (json.has("terminal") && !json.isNull("terminal")) json.optBoolean("terminal") else null,
+                    json.optString("status").takeIf { json.has("status") && it.isNotEmpty() },
+                )
+                if (!keepPolling) {
+                    attribution = jsonToMap(json)
+                    matchStatus = status
+                    prefs.edit()
+                        .putString(ATTR_KEY, json.toString())
+                        .putString(MATCH_STATUS_KEY, status.raw)
+                        .apply()
+                    polling.set(false)
+                    val dlv = json.optString("deep_link_value", "")
+                    if (dlv.isNotEmpty() && dlv != deepLink) {
+                        val apply = if (json.has("applyDeepLink") && !json.isNull("applyDeepLink")) {
+                            json.optBoolean("applyDeepLink")
+                        } else {
+                            null
+                        }
+                        if (AttriloopMatchStatus.shouldApplyDeepLink(apply, status)) setDeepLink(dlv)
+                    }
+                    flushHandlers()
+                    return@execute
                 }
-                flushHandlers(attribution)
-            } else if (attempt < delays.size) {
+                pollHeardPending = true
+            } else {
+                pollTransportFailed = true
+            }
+            if (attempt < delays.size) {
                 io.schedule({ fetchAttribution(attempt + 1) }, delays[attempt], TimeUnit.MILLISECONDS)
             } else {
-                // Exhausted while still pending — release the lock and call any waiters
-                // with whatever is cached so async completions never hang.
                 polling.set(false)
-                flushHandlers(attribution)
+                if (!shouldDeliverAttribution()) {
+                    matchStatus = when {
+                        pollHeardPending -> AttriloopMatchStatus.pending
+                        pollTransportFailed -> AttriloopMatchStatus.failed
+                        else -> AttriloopMatchStatus.pending
+                    }
+                }
+                flushHandlers()
             }
         }
     }
@@ -1179,6 +1406,8 @@ object Attriloop {
         debug = true
         packageName = app.packageName
         attriloopId = "test-attriloop-id"
+        matchStatus = AttriloopMatchStatus.pending
+        playInstallReferrer = null
         prefs.edit().putString(ID_KEY, attriloopId).commit()
     }
 
@@ -1196,7 +1425,12 @@ object Attriloop {
         attriloopId = ""
         customerUserId = null
         attribution = emptyMap()
+        matchStatus = AttriloopMatchStatus.skipped
+        playInstallReferrer = null
+        pollHeardPending = false
+        pollTransportFailed = false
         synchronized(handlers) { handlers.clear() }
+        synchronized(attributionHandlers) { attributionHandlers.clear() }
         deepLink = null
         deepLinkPending = false
         synchronized(deepLinkHandlers) { deepLinkHandlers.clear() }
@@ -1228,8 +1462,35 @@ object Attriloop {
         io.submit { removeQueued(eids) }.get(5, TimeUnit.SECONDS)
     }
 
+    /** Tests only. Writes the same cache [getPlayInstallReferrer] reads. */
+    internal fun setPlayInstallReferrerForTest(value: String?) {
+        rememberPlayInstallReferrer(value)
+    }
+
+    internal fun persistedPlayInstallReferrer(): String? =
+        if (::prefs.isInitialized) prefs.getString(PLAY_REFERRER_KEY, null) else null
+
+    /** Drop the in-memory cache only so a prefs restore can be asserted. */
+    internal fun dropPlayInstallReferrerMemoryForTest() {
+        playInstallReferrer = null
+    }
+
+    internal fun restorePlayInstallReferrerFromPrefsForTest() {
+        restorePlayInstallReferrerFromPrefs()
+    }
+
     internal fun setAttributionForTest(value: Map<String, Any?>) {
         attribution = value
+        val (status, keepPolling) = AttriloopMatchStatus.interpret(
+            value["matchStatus"] as? String,
+            value["terminal"] as? Boolean,
+            value["status"] as? String,
+        )
+        matchStatus = when {
+            !keepPolling -> status
+            value.isNotEmpty() -> AttriloopMatchStatus.matched
+            else -> AttriloopMatchStatus.pending
+        }
     }
 
     internal fun setDeepLinkForTest(value: String, pending: Boolean) {

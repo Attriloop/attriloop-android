@@ -106,6 +106,23 @@ class AttriloopPersistenceTest {
         assertTrue(latch.await(2, TimeUnit.SECONDS))
         assertTrue(onMain.get())
         assertEquals("abc", received.get()["linkId"])
+        assertEquals(AttriloopMatchStatus.matched, Attriloop.getMatchStatus())
+    }
+
+    @Test
+    fun unconfiguredAttributionCallbackFiresSkipped() {
+        Attriloop.resetForTest()
+        val latch = CountDownLatch(1)
+        val received = AtomicReference<AttriloopAttribution>()
+        Attriloop.getAttribution { result ->
+            received.set(result)
+            latch.countDown()
+        }
+        ShadowLooper.idleMainLooper()
+        assertTrue(latch.await(2, TimeUnit.SECONDS))
+        assertEquals(AttriloopMatchStatus.skipped, received.get().status)
+        assertTrue(received.get().params.isEmpty())
+        assertEquals(AttriloopMatchStatus.skipped, Attriloop.getMatchStatus())
     }
 
     @Test
@@ -129,5 +146,20 @@ class AttriloopPersistenceTest {
         Attriloop.onDeepLink { second.countDown() }
         ShadowLooper.idleMainLooper()
         assertFalse("stale resolution must not re-broadcast", second.await(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun playInstallReferrerIsReadOnlyPlayBytes() {
+        assertNull(Attriloop.getPlayInstallReferrer())
+        Attriloop.setPlayInstallReferrerForTest("utm_source=creator&at_click=tok")
+        assertEquals("utm_source=creator&at_click=tok", Attriloop.getPlayInstallReferrer())
+        assertEquals("utm_source=creator&at_click=tok", Attriloop.persistedPlayInstallReferrer())
+        Attriloop.dropPlayInstallReferrerMemoryForTest()
+        assertNull(Attriloop.getPlayInstallReferrer())
+        Attriloop.restorePlayInstallReferrerFromPrefsForTest()
+        assertEquals("utm_source=creator&at_click=tok", Attriloop.getPlayInstallReferrer())
+        Attriloop.setPlayInstallReferrerForTest("")
+        assertNull(Attriloop.getPlayInstallReferrer())
+        assertNull(Attriloop.persistedPlayInstallReferrer())
     }
 }

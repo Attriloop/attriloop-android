@@ -4,9 +4,10 @@ Kotlin SDK for Attriloop — mobile attribution for influencer/creator links.
 
 ## Installation
 
-Release `0.2.1` uses Maven Central. Once the protected release has completed and the
-coordinate resolves publicly, keep `mavenCentral()` in the consumer repositories and
-add the dependency:
+The `0.2.1` AAR is built. It is **not** a public Maven Central coordinate today
+(unsigned, unhosted). Once the protected release has completed and the coordinate
+resolves publicly, keep `mavenCentral()` in the consumer repositories and add the
+dependency:
 
 ```kotlin
 // settings.gradle.kts
@@ -27,15 +28,29 @@ It depends on `com.android.installreferrer:installreferrer` for deterministic
 Play Store attribution.
 
 It does not declare `AD_ID`, location, contacts, phone or storage permissions. Country
-is derived server-side from the request IP, and Android's probabilistic fallback uses a
-one-way fingerprint of IP/platform/locale when no deterministic referrer exists. Review
-the complete [Google Play Data Safety guidance](PRIVACY.md) before publishing a host app.
+is derived server-side from the request IP. When no Play referrer is present the
+install stays unattributed. Coarse IP/platform/locale evidence is diagnostic only
+and is not written as `fingerprint`. Review the complete
+[Google Play Data Safety guidance](PRIVACY.md) before publishing a host app.
 
 ### Customer user id and automatic opens
 
 ```kotlin
 // After your own login: attach your user id to every install/event (persisted).
 Attriloop.setCustomerUserId(user.id)   // pass null on logout
+```
+
+RevenueCat is a separate SDK. Attriloop does not import it. Before the paywall
+loads, set custom subscriber attribute `attriloopId` from
+`Attriloop.attriloopId` / `getAttriloopId()`. Keep RevenueCat's App User ID as
+**your** user id. If you skip the attribute, Attriloop still records the
+purchase. The creator is not paid.
+
+```kotlin
+Purchases.shared.attribution.setAttributes(
+    mapOf("attriloopId" to Attriloop.attriloopId)
+)
+Purchases.shared.logIn(user.id)
 ```
 
 The SDK also emits an automatic `APP_OPEN` event on cold start and on every return
@@ -71,8 +86,14 @@ Attriloop.sendTestEvent { result ->
 
 // Deferred attribution / creator params (resolved a few seconds after first-open):
 val params = Attriloop.getAttributionParams() // mediaSource, campaignName, linkId, …
+val status = Attriloop.getMatchStatus() // matched / organic / pending / … — never inferred from an empty map
 // …or be called back the moment it resolves:
-Attriloop.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p["linkId"] */ }
+Attriloop.getAttribution { result -> /* result.status, result.params["mediaSource"] */ }
+
+// Raw Play Install Referrer (same bytes posted on /v1/install). Null until Play
+// returns a non-empty string. There is no setter — a host-supplied referrer is
+// not merged with Play's.
+val rawReferrer = Attriloop.getPlayInstallReferrer()
 ```
 
 ## How attribution works
@@ -81,12 +102,19 @@ Attriloop.getAttributionParams { p -> /* p["mediaSource"], p["campaignName"], p[
    edge packs our `at_click` token (plus `utm_source` / `utm_campaign`) into the
    Play Store URL's `referrer` param — the only field Google forwards — so the
    backend decodes it to the exact click (deterministic, `match_method = play_referrer`).
-2. If no referrer click id is present, the backend falls back to a coarse
-   fingerprint (IP + platform + locale) within the attribution window.
+2. If no referrer click id is present, the install stays **unattributed**. Coarse
+   IP / platform / locale evidence is diagnostic only. It does not assign a creator
+   and it is not written as `fingerprint`.
 3. An App Link opened with the app installed resolves through `/v1/resolve` and emits
    one automatic reengagement for that link; it never reassigns the install.
-4. `getAttributionParams()` polls `GET /v1/attribution` until the backend resolves
-   the install, then caches the result.
+4. `getAttribution()` / `getMatchStatus()` poll `GET /v1/attribution` until the
+   backend resolves the install. Wire `unattributed` stays `pending` (a claim can
+   still upgrade it). Silence is never `organic`.
+
+`claimReferralCode` is public. The host must present the claim UI. If you skip it,
+a store-drop install that never received Play stays unattributed. The creator is
+not paid. A claim against an already-billable method returns `409 already_attributed`. An empty map is **not** organic — call
+   `getMatchStatus()` / `getAttribution`.
 
 ## App Links (open the app if installed)
 
@@ -108,11 +136,14 @@ entered in the **Attriloop console → SDK setup**.
 
 Same public surface as the iOS `AttriloopSDK`: `configure`, `setCustomerUserId`,
 `sendEvent`, `sendCustomEvent`, `sendTestEvent`, `flushQueue`, `getAttriloopId`,
-`getAttributionParams` (sync + async callback), `handleDeepLink`, `getDeepLink`,
+`getAttributionParams` (sync + async callback), `getMatchStatus`, `getAttribution`, `handleDeepLink`, `getDeepLink`,
 `onDeepLink`. Event names are identical (`AttriloopEvent`). Host callbacks
 (`onDeepLink`, `getAttributionParams`, `sendTestEvent`) run on the main thread.
-Differences: Android adds the Play Install Referrer (deterministic) and a coarse
-fingerprint fallback; iOS adds AdServices, SKAdNetwork and AdAttributionKit.
+Differences: Android adds the Play Install Referrer (deterministic) and
+`getPlayInstallReferrer()` (read-only; no host write). Coarse IP / locale
+evidence is diagnostic only and never credits. iOS adds AdServices,
+SKAdNetwork, AdAttributionKit, and `onReferralCodeFromUniversalLink`.
+`claimReferralCode` exists on both.
 
 ## Build & test
 

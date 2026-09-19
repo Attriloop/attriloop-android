@@ -194,8 +194,8 @@ class AttriloopTest {
         val out = Attriloop.sanitizedParameters(mapOf("score" to Double.NaN, "level" to 3))
         assertFalse(out.containsKey("score"))
         assertEquals(3, out["level"])
-        // org.json would return null from toString() for NaN — the whole queue would vanish.
-        assertTrue(JSONObject(out).toString() != null)
+        // A non-finite value must be removed before org.json serializes the queue.
+        assertEquals("{\"level\":3}", JSONObject(out).toString())
     }
 
     // ── batch flush (POST /v1/events) ──────────────────────────────────────
@@ -295,6 +295,12 @@ class AttriloopTest {
         assertFalse(Attriloop.referrerUpdateNeeded(installAlreadySent = true, referrer = "at_click=abc", referrerAlreadySent = true))
     }
 
+    @Test fun playTimestampsAreOmittedWhenPlayReportsZero() {
+        assertNull(Attriloop.playTimestampOrNull(0))
+        assertNull(Attriloop.playTimestampOrNull(-1))
+        assertEquals(1_700_000_000L, Attriloop.playTimestampOrNull(1_700_000_000L))
+    }
+
     @Test fun referrerFallbackIsEightSeconds() {
         assertEquals(8L, Attriloop.REFERRER_FALLBACK_SECONDS)
     }
@@ -316,5 +322,124 @@ class AttriloopTest {
 
     @Test fun appOpenIsAutomaticOnly() {
         assertEquals("APP_OPEN", AttriloopEvent.APP_OPEN.raw)
+    }
+
+    @Test fun referralCodeNormalization() {
+        assertEquals("AB2C3D", Attriloop.normalizeReferralCode("ab2-c3d"))
+        assertEquals("AB2C3D", Attriloop.normalizeReferralCode("  ab2 c3d  "))
+        assertNull(Attriloop.normalizeReferralCode(""))
+        assertNull(Attriloop.normalizeReferralCode("AB2C3"))
+        assertNull(Attriloop.normalizeReferralCode("OABCDE"))
+        assertNull(Attriloop.normalizeReferralCode("0ABCDE"))
+        assertNull(Attriloop.normalizeReferralCode("IABCDE"))
+        assertNull(Attriloop.normalizeReferralCode("1ABCDE"))
+        assertNull(Attriloop.normalizeReferralCode("LABCDE"))
+    }
+
+    @Test fun referralClaimErrorReadsEdgeBody() {
+        assertEquals("install_not_found", Attriloop.referralClaimError("""{"error":"install_not_found"}"""))
+        assertNull(Attriloop.referralClaimError(null))
+        assertNull(Attriloop.referralClaimError("{"))
+    }
+
+    @Test fun unconfiguredMatchStatusIsSkippedNotOrganic() {
+        Attriloop.resetForTest()
+        assertEquals(AttriloopMatchStatus.skipped, Attriloop.getMatchStatus())
+        assertTrue(Attriloop.getAttributionParams().isEmpty())
+    }
+
+    @Test fun silenceFromServerIsPendingNeverOrganic() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret(null, null, null)
+        assertEquals(AttriloopMatchStatus.pending, status)
+        assertTrue(keepPolling)
+        assertTrue(status != AttriloopMatchStatus.organic)
+    }
+
+    @Test fun wirePendingIsNotTerminal() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret("pending", false, "pending")
+        assertEquals(AttriloopMatchStatus.pending, status)
+        assertTrue(keepPolling)
+    }
+
+    @Test fun legacyUnattributedStatusStaysPending() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret(null, null, "unattributed")
+        assertEquals(AttriloopMatchStatus.pending, status)
+        assertTrue(keepPolling)
+    }
+
+    @Test fun wireOrganicIsOrganic() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret("organic", true, "organic")
+        assertEquals(AttriloopMatchStatus.organic, status)
+        assertFalse(keepPolling)
+    }
+
+    @Test fun wireMatchedIsMatchedWithoutReadingAMethod() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret("matched", true, "attributed")
+        assertEquals(AttriloopMatchStatus.matched, status)
+        assertFalse(keepPolling)
+    }
+
+    @Test fun legacyAttributedStatusIsMatchedWithoutAMethodList() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret(null, null, "attributed")
+        assertEquals(AttriloopMatchStatus.matched, status)
+        assertFalse(keepPolling)
+    }
+
+    @Test fun matchedWithEmptyParamsIsStillMatched() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret("matched", true, null)
+        assertEquals(AttriloopMatchStatus.matched, status)
+        assertFalse(keepPolling)
+        val result = AttriloopAttribution(AttriloopMatchStatus.matched, emptyMap())
+        assertEquals(AttriloopMatchStatus.matched, result.status)
+        assertTrue(result.params.isEmpty())
+    }
+
+    @Test fun wireAmbiguousAndFailed() {
+        assertEquals(
+            AttriloopMatchStatus.ambiguous,
+            AttriloopMatchStatus.interpret(null, null, "ambiguous").first,
+        )
+        assertEquals(
+            AttriloopMatchStatus.failed,
+            AttriloopMatchStatus.interpret(null, null, "failed").first,
+        )
+    }
+
+    @Test fun matchStatusColumnWinsOverLegacyStatus() {
+        val (status, keepPolling) = AttriloopMatchStatus.interpret("pending", false, "organic")
+        assertEquals(AttriloopMatchStatus.pending, status)
+        assertTrue(keepPolling)
+    }
+
+    @Test fun deepLinkFollowsApplyDeepLinkNotMethodNames() {
+        assertTrue(AttriloopMatchStatus.shouldApplyDeepLink(true, AttriloopMatchStatus.organic))
+        assertFalse(AttriloopMatchStatus.shouldApplyDeepLink(false, AttriloopMatchStatus.matched))
+        assertTrue(AttriloopMatchStatus.shouldApplyDeepLink(null, AttriloopMatchStatus.matched))
+        assertFalse(AttriloopMatchStatus.shouldApplyDeepLink(null, AttriloopMatchStatus.organic))
+    }
+
+    @Test fun restoredEmptyCacheIsPendingOnceConfigured() {
+        assertEquals(
+            AttriloopMatchStatus.pending,
+            AttriloopMatchStatus.restored(true, null, emptyMap()),
+        )
+        assertEquals(
+            AttriloopMatchStatus.skipped,
+            AttriloopMatchStatus.restored(false, "organic", emptyMap()),
+        )
+    }
+
+    @Test fun unconfiguredPlayInstallReferrerIsNull() {
+        Attriloop.resetForTest()
+        assertNull(Attriloop.getPlayInstallReferrer())
+    }
+
+    @Test fun emptyPlayInstallReferrerIsForgottenNotStored() {
+        Attriloop.resetForTest()
+        Attriloop.setPlayInstallReferrerForTest("at_click=tok")
+        Attriloop.setPlayInstallReferrerForTest("")
+        assertNull(Attriloop.getPlayInstallReferrer())
+        Attriloop.setPlayInstallReferrerForTest(null)
+        assertNull(Attriloop.getPlayInstallReferrer())
     }
 }

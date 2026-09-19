@@ -30,6 +30,28 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    buildTypes {
+        release {
+            // Obfuscate the AAR host apps consume. Public API is kept via
+            // proguard-rules.pro; consumer-rules.pro is what the host's R8 uses.
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+}
+
+// Release unit tests would load the minified class file while still calling
+// internal helpers by their source names. The 43 tests stay on debug.
+androidComponents {
+    beforeVariants { variant ->
+        if (variant.buildType == "release") {
+            variant.enableUnitTest = false
+        }
+    }
 }
 
 dependencies {
