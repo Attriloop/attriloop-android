@@ -4,8 +4,7 @@ Kotlin SDK for Attriloop — mobile attribution for influencer/creator links.
 
 ## Installation
 
-The `0.2.1` AAR is built. It is **not** a public Maven Central coordinate today
-(unsigned, unhosted). Once the protected release has completed and the coordinate
+The tested `0.2.1` AAR is available as a [GitHub preview release](https://github.com/Attriloop/attriloop-android/releases/tag/artifact-0.2.1). It is **not** a public Maven Central coordinate yet. Once the protected release has completed and the coordinate
 resolves publicly, keep `mavenCentral()` in the consumer repositories and add the
 dependency:
 
