@@ -1,0 +1,447 @@
+{
+  "description": "Shared user_attributes normalization vectors (add-sdk-attribution-api, design D7). Source of truth: packages/core/test-vectors/user-attributes.json. Copied into the SDK repos by scripts/sync-test-vectors.sh; do not edit the copies.",
+  "today": "20261101",
+  "parameterAliases": {
+    "email": "email",
+    "name": "name",
+    "first_name": "firstName",
+    "firstName": "firstName",
+    "last_name": "lastName",
+    "lastName": "lastName",
+    "phone": "phoneNumber",
+    "phone_number": "phoneNumber",
+    "phoneNumber": "phoneNumber",
+    "date_of_birth": "dateOfBirth",
+    "dateOfBirth": "dateOfBirth",
+    "birthdate": "dateOfBirth",
+    "birthday": "dateOfBirth",
+    "gender": "gender"
+  },
+  "cases": [
+    {
+      "name": "email mixed case with spaces",
+      "input": {
+        "email": "  Ana.Perez@Example.COM "
+      },
+      "expected": {
+        "email": "3c6c5c25f4b64020ae299c05c0e540df807d9aed7457b04b118cc234a6a58c6a"
+      }
+    },
+    {
+      "name": "email trailing space",
+      "input": {
+        "email": "Ana@Example.com "
+      },
+      "expected": {
+        "email": "8e43ca37701228e74983efdbd0cff5c16b3b1e5d4e29a7c05626d4d25a018e11"
+      }
+    },
+    {
+      "name": "email tab and nbsp trimmed",
+      "input": {
+        "email": "\t ana@example.com "
+      },
+      "expected": {
+        "email": "8e43ca37701228e74983efdbd0cff5c16b3b1e5d4e29a7c05626d4d25a018e11"
+      }
+    },
+    {
+      "name": "email without at dropped",
+      "input": {
+        "email": "ana.example.com"
+      },
+      "expected": {}
+    },
+    {
+      "name": "email with two ats dropped",
+      "input": {
+        "email": "ana@@example.com"
+      },
+      "expected": {}
+    },
+    {
+      "name": "email empty local part dropped",
+      "input": {
+        "email": "@example.com"
+      },
+      "expected": {}
+    },
+    {
+      "name": "email empty domain dropped",
+      "input": {
+        "email": "ana@"
+      },
+      "expected": {}
+    },
+    {
+      "name": "email unicode lowercased",
+      "input": {
+        "email": "ÁNGEL@Example.com"
+      },
+      "expected": {
+        "email": "70bc0efa5045d6e929d6a4139656088c31eba1cc0e921ae4b8c2cc1657d12e58"
+      }
+    },
+    {
+      "name": "email pre-hashed passes through lowercased",
+      "input": {
+        "email": "8E43CA37701228E74983EFDBD0CFF5C16B3B1E5D4E29A7C05626D4D25A018E11"
+      },
+      "expected": {
+        "email": "8e43ca37701228e74983efdbd0cff5c16b3b1e5d4e29a7c05626d4d25a018e11"
+      }
+    },
+    {
+      "name": "full name split",
+      "input": {
+        "name": "María José O'Neill"
+      },
+      "expected": {
+        "first_name": "edd82ab3ecfe1ad7550fb74d2ae00211f13eb3bb9ef2d3030a16012854c7742a",
+        "last_name": "6db99a5ab6ad107efc4276e5a089dc628d1b440828f1f33e30930690b97c4fe6"
+      }
+    },
+    {
+      "name": "single word name",
+      "input": {
+        "name": "Cher"
+      },
+      "expected": {
+        "first_name": "e6057f273b924a533ddfa863c1c6132b544c47029b78ac9f6975897f0b457a81"
+      }
+    },
+    {
+      "name": "explicit last name wins over split",
+      "input": {
+        "name": "Ana Perez",
+        "lastName": "García"
+      },
+      "expected": {
+        "first_name": "24d4b96f58da6d4a8512313bbd02a28ebf0ca95dec6e4c86ef78ce7f01e788ac",
+        "last_name": "ad321a21e537233f2cf61e749c48dba9461f84dec289e418ab8f9d73d6c83125"
+      }
+    },
+    {
+      "name": "explicit first name wins over split",
+      "input": {
+        "name": "Ana Perez",
+        "firstName": "Anita"
+      },
+      "expected": {
+        "first_name": "000e02e40e441be798211aaf86d037bacd3dedbc8a6318ca5f9a5c72ad52ffbe",
+        "last_name": "a5ed602ee512bda8b2b18d6d4b06d6f176e7e3fb15a0cf5b23028b9849bd0d62"
+      }
+    },
+    {
+      "name": "name collapses internal whitespace",
+      "input": {
+        "name": "  Jean   Luc \t Picard "
+      },
+      "expected": {
+        "first_name": "4ff17bc8ee5f240c792b8a41bfa2c58af726d83b925cf696af0c811627714c85",
+        "last_name": "202af611cffc885ea1b0a29f7d2ac2c328c4f6651e6c06f0c38f749e26971adb"
+      }
+    },
+    {
+      "name": "punctuation and symbols removed",
+      "input": {
+        "firstName": "Jean-Luc!",
+        "lastName": "D'Arc ©®"
+      },
+      "expected": {
+        "first_name": "7fef38066db9900f992fa9926eea8cc648f44c2af50c4d511c415422196c8ef5",
+        "last_name": "d3735b2509bfc0a0a3b22ae0240b2753e1da5973fd456096375f349732e6f1a2"
+      }
+    },
+    {
+      "name": "decomposed accents normalized to NFC",
+      "input": {
+        "firstName": "José"
+      },
+      "expected": {
+        "first_name": "d994e1d001886fe5b45b1267bd1fa2b752ac50742579bd3dad7b2a2aa0ed6866"
+      }
+    },
+    {
+      "name": "unicode names",
+      "input": {
+        "firstName": "Søren",
+        "lastName": "Ærøskøbing-Ølgaard"
+      },
+      "expected": {
+        "first_name": "6bea0147015afcbe7867cb289b53dd76f818718c50a1cd60f22ac7a2044708fb",
+        "last_name": "55a4c59444bf186b74b34de9bcf0bc0bc0c94e3534909c8eb2b83b78e6a8c1dd"
+      }
+    },
+    {
+      "name": "cjk name",
+      "input": {
+        "name": "山田 太郎"
+      },
+      "expected": {
+        "first_name": "5f34cd8399195fa23a32ace56c87f461adcbee99d90d9e60057f01684b3b46da",
+        "last_name": "3e63216aec8dbdf61f8a4e80bab42f3a30ab9c58ebf824b5af7241c6e30988ed"
+      }
+    },
+    {
+      "name": "name of only punctuation dropped",
+      "input": {
+        "name": "--- !!!"
+      },
+      "expected": {}
+    },
+    {
+      "name": "explicit empty first name falls back to split",
+      "input": {
+        "name": "Ana Perez",
+        "firstName": "  "
+      },
+      "expected": {
+        "first_name": "24d4b96f58da6d4a8512313bbd02a28ebf0ca95dec6e4c86ef78ce7f01e788ac",
+        "last_name": "a5ed602ee512bda8b2b18d6d4b06d6f176e7e3fb15a0cf5b23028b9849bd0d62"
+      }
+    },
+    {
+      "name": "phone international format",
+      "input": {
+        "phoneNumber": "+34 (600) 000-000"
+      },
+      "expected": {
+        "ph_meta": "4c6c2f0cc944bdc33e1317b1577521f646ba548be3aad24d62e990213942acbf",
+        "ph_tiktok": "32f67ab4e4312618b09cd23ed8ce41b13e095fe52b73b2e8da8ef49830e50dba"
+      }
+    },
+    {
+      "name": "phone 00 prefix",
+      "input": {
+        "phoneNumber": "0034600000000"
+      },
+      "expected": {
+        "ph_meta": "4c6c2f0cc944bdc33e1317b1577521f646ba548be3aad24d62e990213942acbf",
+        "ph_tiktok": "32f67ab4e4312618b09cd23ed8ce41b13e095fe52b73b2e8da8ef49830e50dba"
+      }
+    },
+    {
+      "name": "phone plus prefix",
+      "input": {
+        "phoneNumber": "+34600000000"
+      },
+      "expected": {
+        "ph_meta": "4c6c2f0cc944bdc33e1317b1577521f646ba548be3aad24d62e990213942acbf",
+        "ph_tiktok": "32f67ab4e4312618b09cd23ed8ce41b13e095fe52b73b2e8da8ef49830e50dba"
+      }
+    },
+    {
+      "name": "phone too short",
+      "input": {
+        "phoneNumber": "12345"
+      },
+      "expected": {}
+    },
+    {
+      "name": "phone too long",
+      "input": {
+        "phoneNumber": "+1234567890123456"
+      },
+      "expected": {}
+    },
+    {
+      "name": "phone exactly 7 digits",
+      "input": {
+        "phoneNumber": "1234567"
+      },
+      "expected": {
+        "ph_meta": "8bb0cf6eb9b17d0f7d22b456f121257dc1254e1f01665370476383ea776df414",
+        "ph_tiktok": "8b425df0d3eb16fdb7eec7d37c426fe6378708a45b25d3aa2ba65eaf54b6c9ed"
+      }
+    },
+    {
+      "name": "phone exactly 15 digits",
+      "input": {
+        "phoneNumber": "123456789012345"
+      },
+      "expected": {
+        "ph_meta": "e27a7686b8028cfee7b57d954c3abccfb2a701968925f52bbd482e77be5de0bb",
+        "ph_tiktok": "1b4baed9795e95210d08a51886e9d33e5da06189403c2a823c9d92e222ad55e8"
+      }
+    },
+    {
+      "name": "phone national number not guessed",
+      "input": {
+        "phoneNumber": "600 000 000"
+      },
+      "expected": {
+        "ph_meta": "60f3b6b85d4e4caa3f247ccfdea2f013639ac17e84dd7cadfe8072b6754d6ae7",
+        "ph_tiktok": "2fde87fe91846ba345aecc4882d0f4c2bccaaa25f34fa3f6eb7f7e2f2f4f97bc"
+      }
+    },
+    {
+      "name": "phone us format",
+      "input": {
+        "phoneNumber": "+1 (650) 555-1234"
+      },
+      "expected": {
+        "ph_meta": "6069d14bf122fdfd931dc7beb58e5dfbba395b1faf05bdcd42d12358d63d8599",
+        "ph_tiktok": "a2996076d3ad4af5dc818b908b3d8e354f26ededf7df0e0aa6ac354143805ee0"
+      }
+    },
+    {
+      "name": "dob iso",
+      "input": {
+        "dateOfBirth": "1990-04-07"
+      },
+      "expected": {
+        "date_of_birth": "ff60a4909c117630a910cfcbafc5f1569a48e104fc8fdcc19c8709a051568276"
+      }
+    },
+    {
+      "name": "dob slashes",
+      "input": {
+        "dateOfBirth": "1990/04/07"
+      },
+      "expected": {
+        "date_of_birth": "ff60a4909c117630a910cfcbafc5f1569a48e104fc8fdcc19c8709a051568276"
+      }
+    },
+    {
+      "name": "dob compact",
+      "input": {
+        "dateOfBirth": "19900407"
+      },
+      "expected": {
+        "date_of_birth": "ff60a4909c117630a910cfcbafc5f1569a48e104fc8fdcc19c8709a051568276"
+      }
+    },
+    {
+      "name": "dob invalid calendar day",
+      "input": {
+        "dateOfBirth": "1990-02-31"
+      },
+      "expected": {}
+    },
+    {
+      "name": "dob day-first format rejected",
+      "input": {
+        "dateOfBirth": "31/02/1990"
+      },
+      "expected": {}
+    },
+    {
+      "name": "dob leap day valid",
+      "input": {
+        "dateOfBirth": "2000-02-29"
+      },
+      "expected": {
+        "date_of_birth": "78958c155b420adeffb55186f1ff24a0cd544a1d9577e114e7793cc45f90ae01"
+      }
+    },
+    {
+      "name": "dob non leap day invalid",
+      "input": {
+        "dateOfBirth": "1900-02-29"
+      },
+      "expected": {}
+    },
+    {
+      "name": "dob before 1900",
+      "input": {
+        "dateOfBirth": "1899-12-31"
+      },
+      "expected": {}
+    },
+    {
+      "name": "dob future",
+      "input": {
+        "dateOfBirth": "2999-01-01"
+      },
+      "expected": {}
+    },
+    {
+      "name": "dob today is valid",
+      "input": {
+        "dateOfBirth": "2026-11-01"
+      },
+      "expected": {
+        "date_of_birth": "3de9e684894c97399df845620722ebb9c0ebb9393812d32f411f7c12732db0da"
+      }
+    },
+    {
+      "name": "dob tomorrow is future",
+      "input": {
+        "dateOfBirth": "2026-11-02"
+      },
+      "expected": {}
+    },
+    {
+      "name": "dob mixed separators rejected",
+      "input": {
+        "dateOfBirth": "1990-04/07"
+      },
+      "expected": {}
+    },
+    {
+      "name": "gender word form",
+      "input": {
+        "gender": " Female "
+      },
+      "expected": {
+        "gender": "252f10c83610ebca1a059c0bae8255eba2f95be4d1d7bcfa89d7248a82d9f111"
+      }
+    },
+    {
+      "name": "gender male",
+      "input": {
+        "gender": "MALE"
+      },
+      "expected": {
+        "gender": "62c66a7a5dd70c3146618063c344e531e6d4b59e379808443ce962b3abd63c5a"
+      }
+    },
+    {
+      "name": "gender letter",
+      "input": {
+        "gender": "m"
+      },
+      "expected": {
+        "gender": "62c66a7a5dd70c3146618063c344e531e6d4b59e379808443ce962b3abd63c5a"
+      }
+    },
+    {
+      "name": "gender unsupported",
+      "input": {
+        "gender": "nonbinary"
+      },
+      "expected": {}
+    },
+    {
+      "name": "all fields",
+      "input": {
+        "email": "ana@example.com",
+        "name": "Ana Perez",
+        "phoneNumber": "+34 600 000 000",
+        "dateOfBirth": "1990-04-07",
+        "gender": "f"
+      },
+      "expected": {
+        "email": "8e43ca37701228e74983efdbd0cff5c16b3b1e5d4e29a7c05626d4d25a018e11",
+        "first_name": "24d4b96f58da6d4a8512313bbd02a28ebf0ca95dec6e4c86ef78ce7f01e788ac",
+        "last_name": "a5ed602ee512bda8b2b18d6d4b06d6f176e7e3fb15a0cf5b23028b9849bd0d62",
+        "ph_meta": "4c6c2f0cc944bdc33e1317b1577521f646ba548be3aad24d62e990213942acbf",
+        "ph_tiktok": "32f67ab4e4312618b09cd23ed8ce41b13e095fe52b73b2e8da8ef49830e50dba",
+        "date_of_birth": "ff60a4909c117630a910cfcbafc5f1569a48e104fc8fdcc19c8709a051568276",
+        "gender": "252f10c83610ebca1a059c0bae8255eba2f95be4d1d7bcfa89d7248a82d9f111"
+      }
+    },
+    {
+      "name": "unusable value dropped, others kept",
+      "input": {
+        "email": "ana@example.com",
+        "dateOfBirth": "31/02/1990",
+        "gender": "x"
+      },
+      "expected": {
+        "email": "8e43ca37701228e74983efdbd0cff5c16b3b1e5d4e29a7c05626d4d25a018e11"
+      }
+    }
+  ]
+}

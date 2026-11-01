@@ -1,0 +1,329 @@
+{
+  "description": "Recorded GET /v1/attribution bodies and the attriloop_* contract keys both SDKs must derive from them when the body is the last poll answer (add-sdk-attribution-api 7.2). `settled` = the SDK stops waiting on this body; `repollNextLaunch` = legacy terminal is false, so the SDK polls once on the next launch. A wait that ends on an unsettled body yields `failed`. Source of truth: packages/core/test-vectors/attribution-poll.json; copied into the SDK repos by scripts/sync-test-vectors.sh.",
+  "attriloopId": "0f9c5b8e-2d1a-4c3b-9e7f-111111111111",
+  "cases": [
+    {
+      "name": "matched meta probabilistic",
+      "row": {
+        "matchMethod": "probabilistic",
+        "matchingType": "exact_ip",
+        "confidence": "high",
+        "adNetwork": "meta",
+        "campaignId": "120200000000001",
+        "campaignName": "Spring Sale",
+        "adsetId": "120200000000002",
+        "adsetName": "US 18-34",
+        "adId": "120200000000003",
+        "adName": "Video A"
+      },
+      "body": {
+        "matchMethod": "probabilistic",
+        "matchingType": "exact_ip",
+        "confidence": "high",
+        "confidenceScore": null,
+        "linkId": "link_1",
+        "mediaSource": "meta_ads",
+        "campaignId": "120200000000001",
+        "campaignName": "Spring Sale",
+        "clickId": "click_1",
+        "clickToFirstOpenHours": 0.2,
+        "deepLinkValue": "promo/spring",
+        "adNetwork": "meta",
+        "matchStatus": "matched",
+        "terminal": true,
+        "status": "attributed",
+        "applyDeepLink": true,
+        "deep_link_value": "promo/spring",
+        "at_click": "click_1",
+        "attriloop_match_status": "matched",
+        "attribution_params": {
+          "attriloop_match_status": "matched",
+          "attriloop_adnetwork": "meta",
+          "attriloop_campaign": "Spring Sale",
+          "attriloop_adset": "US 18-34",
+          "attriloop_ad": "Video A",
+          "attriloop_matching_type": "exact_ip",
+          "attriloop_confidence": "high"
+        }
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": {
+        "attriloop_match_status": "matched",
+        "attriloop_adnetwork": "meta",
+        "attriloop_campaign": "Spring Sale",
+        "attriloop_adset": "US 18-34",
+        "attriloop_ad": "Video A",
+        "attriloop_matching_type": "exact_ip",
+        "attriloop_confidence": "high"
+      },
+      "legacy": { "mediaSource": "meta_ads", "campaignName": "Spring Sale" }
+    },
+    {
+      "name": "creator link without tracking params",
+      "row": {
+        "matchMethod": "deeplink",
+        "matchingType": "network",
+        "confidence": "high",
+        "adNetwork": null,
+        "campaignId": null,
+        "campaignName": null
+      },
+      "body": {
+        "matchMethod": "deeplink",
+        "matchingType": "network",
+        "confidence": "high",
+        "confidenceScore": null,
+        "linkId": "link_2",
+        "mediaSource": "creator_ana",
+        "campaignId": null,
+        "campaignName": null,
+        "clickId": "click_2",
+        "clickToFirstOpenHours": 1.5,
+        "deepLinkValue": null,
+        "adNetwork": null,
+        "matchStatus": "matched",
+        "terminal": true,
+        "status": "attributed",
+        "applyDeepLink": true,
+        "deep_link_value": null,
+        "at_click": "click_2",
+        "attriloop_match_status": "matched_no_params",
+        "attribution_params": {
+          "attriloop_match_status": "matched_no_params",
+          "attriloop_matching_type": "network",
+          "attriloop_confidence": "high"
+        }
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": {
+        "attriloop_match_status": "matched_no_params",
+        "attriloop_matching_type": "network",
+        "attriloop_confidence": "high"
+      },
+      "legacy": { "mediaSource": "creator_ana", "linkId": "link_2" }
+    },
+    {
+      "name": "campaign id falls back when name is missing",
+      "row": {
+        "matchMethod": "play_referrer",
+        "matchingType": "network",
+        "confidence": "high",
+        "adNetwork": "tiktok",
+        "campaignId": "1789000000000001",
+        "campaignName": null
+      },
+      "body": {
+        "matchMethod": "play_referrer",
+        "matchingType": "network",
+        "confidence": "high",
+        "confidenceScore": null,
+        "linkId": "link_3",
+        "mediaSource": "tiktok_ads",
+        "campaignId": "1789000000000001",
+        "campaignName": null,
+        "clickId": "click_3",
+        "clickToFirstOpenHours": 3,
+        "deepLinkValue": null,
+        "adNetwork": "tiktok",
+        "matchStatus": "matched",
+        "terminal": true,
+        "status": "attributed",
+        "applyDeepLink": true,
+        "deep_link_value": null,
+        "at_click": "click_3",
+        "attriloop_match_status": "matched",
+        "attribution_params": {
+          "attriloop_match_status": "matched",
+          "attriloop_adnetwork": "tiktok",
+          "attriloop_campaign": "1789000000000001",
+          "attriloop_matching_type": "network",
+          "attriloop_confidence": "high"
+        }
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": {
+        "attriloop_match_status": "matched",
+        "attriloop_adnetwork": "tiktok",
+        "attriloop_campaign": "1789000000000001",
+        "attriloop_matching_type": "network",
+        "attriloop_confidence": "high"
+      },
+      "legacy": { "mediaSource": "tiktok_ads" }
+    },
+    {
+      "name": "unattributed inside the claim window",
+      "row": { "matchMethod": "unattributed" },
+      "body": {
+        "matchMethod": "unattributed",
+        "matchingType": null,
+        "confidence": null,
+        "confidenceScore": null,
+        "linkId": null,
+        "mediaSource": null,
+        "campaignId": null,
+        "campaignName": null,
+        "clickId": null,
+        "clickToFirstOpenHours": null,
+        "deepLinkValue": null,
+        "adNetwork": null,
+        "matchStatus": "pending",
+        "terminal": false,
+        "status": "pending",
+        "applyDeepLink": false,
+        "deep_link_value": null,
+        "at_click": null,
+        "attriloop_match_status": "organic",
+        "attribution_params": { "attriloop_match_status": "organic" }
+      },
+      "settled": true,
+      "repollNextLaunch": true,
+      "expected": { "attriloop_match_status": "organic" },
+      "legacy": {}
+    },
+    {
+      "name": "probabilistic below threshold",
+      "row": {
+        "matchMethod": "probabilistic",
+        "matchingType": "geo",
+        "confidence": "low",
+        "adNetwork": "meta",
+        "campaignName": "Spring Sale"
+      },
+      "body": {
+        "matchMethod": "unattributed",
+        "matchingType": null,
+        "confidence": null,
+        "confidenceScore": null,
+        "linkId": null,
+        "mediaSource": null,
+        "campaignId": null,
+        "campaignName": null,
+        "clickId": null,
+        "clickToFirstOpenHours": null,
+        "deepLinkValue": null,
+        "adNetwork": null,
+        "matchStatus": "pending",
+        "terminal": false,
+        "status": "pending",
+        "applyDeepLink": false,
+        "deep_link_value": null,
+        "at_click": null,
+        "attriloop_match_status": "organic",
+        "attribution_params": { "attriloop_match_status": "organic" }
+      },
+      "settled": true,
+      "repollNextLaunch": true,
+      "expected": { "attriloop_match_status": "organic" },
+      "legacy": {}
+    },
+    {
+      "name": "no row yet",
+      "body": {
+        "matchStatus": "pending",
+        "terminal": false,
+        "status": "pending",
+        "applyDeepLink": false,
+        "attriloop_match_status": "pending",
+        "attribution_params": { "attriloop_match_status": "pending" }
+      },
+      "settled": false,
+      "repollNextLaunch": true,
+      "expected": { "attriloop_match_status": "failed" },
+      "legacy": {}
+    },
+    {
+      "name": "erased subject",
+      "erased": true,
+      "body": {
+        "matchStatus": "organic",
+        "terminal": true,
+        "status": "organic",
+        "applyDeepLink": false,
+        "attriloop_match_status": "skipped",
+        "attribution_params": { "attriloop_match_status": "skipped" }
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": { "attriloop_match_status": "skipped" },
+      "legacy": {}
+    },
+    {
+      "name": "old edge matched with campaign",
+      "body": {
+        "matchMethod": "deeplink",
+        "matchingType": "network",
+        "confidence": "high",
+        "confidenceScore": null,
+        "linkId": "link_4",
+        "mediaSource": "creator_ana",
+        "campaignId": null,
+        "campaignName": "launch",
+        "clickId": "click_4",
+        "clickToFirstOpenHours": 2,
+        "deepLinkValue": null,
+        "matchStatus": "matched",
+        "terminal": true,
+        "status": "attributed",
+        "applyDeepLink": true,
+        "deep_link_value": null,
+        "at_click": "click_4"
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": {
+        "attriloop_match_status": "matched",
+        "attriloop_campaign": "launch",
+        "attriloop_matching_type": "network",
+        "attriloop_confidence": "high"
+      },
+      "legacy": { "mediaSource": "creator_ana", "campaignName": "launch" }
+    },
+    {
+      "name": "old edge matched with media source only",
+      "body": {
+        "matchMethod": "deeplink",
+        "linkId": "link_5",
+        "mediaSource": "creator_ana",
+        "campaignName": null,
+        "matchStatus": "matched",
+        "terminal": true,
+        "status": "attributed",
+        "applyDeepLink": true
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": { "attriloop_match_status": "matched_no_params" },
+      "legacy": { "mediaSource": "creator_ana" }
+    },
+    {
+      "name": "old edge organic",
+      "body": {
+        "matchMethod": "organic",
+        "matchStatus": "organic",
+        "terminal": true,
+        "status": "organic",
+        "applyDeepLink": false
+      },
+      "settled": true,
+      "repollNextLaunch": false,
+      "expected": { "attriloop_match_status": "organic" },
+      "legacy": {}
+    },
+    {
+      "name": "old edge pending",
+      "body": {
+        "matchStatus": "pending",
+        "terminal": false,
+        "status": "pending",
+        "applyDeepLink": false
+      },
+      "settled": false,
+      "repollNextLaunch": true,
+      "expected": { "attriloop_match_status": "failed" },
+      "legacy": {}
+    }
+  ]
+}
