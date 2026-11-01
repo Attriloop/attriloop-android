@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.attriloop"
-version = "0.2.1"
+version = "0.3.0"
 
 android {
     namespace = "io.attriloop.sdk"
@@ -45,7 +45,7 @@ android {
 }
 
 // Release unit tests would load the minified class file while still calling
-// internal helpers by their source names. The 43 tests stay on debug.
+// internal helpers by their source names. Unit tests stay on debug.
 androidComponents {
     beforeVariants { variant ->
         if (variant.buildType == "release") {
@@ -65,6 +65,7 @@ dependencies {
     testImplementation("org.json:json:20240303")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 mavenPublishing {

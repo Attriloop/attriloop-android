@@ -110,7 +110,7 @@ class AttriloopPersistenceTest {
     }
 
     @Test
-    fun unconfiguredAttributionCallbackFiresSkipped() {
+    fun unconfiguredAttributionCallbackFiresNotConfigured() {
         Attriloop.resetForTest()
         val latch = CountDownLatch(1)
         val received = AtomicReference<AttriloopAttribution>()
@@ -120,9 +120,9 @@ class AttriloopPersistenceTest {
         }
         ShadowLooper.idleMainLooper()
         assertTrue(latch.await(2, TimeUnit.SECONDS))
-        assertEquals(AttriloopMatchStatus.skipped, received.get().status)
-        assertTrue(received.get().params.isEmpty())
-        assertEquals(AttriloopMatchStatus.skipped, Attriloop.getMatchStatus())
+        assertEquals(AttriloopMatchStatus.notConfigured, received.get().status)
+        assertEquals("not_configured", received.get().params["attriloop_match_status"])
+        assertEquals(AttriloopMatchStatus.notConfigured, Attriloop.getMatchStatus())
     }
 
     @Test

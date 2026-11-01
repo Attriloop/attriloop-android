@@ -10,7 +10,7 @@
     public static final io.attriloop.sdk.Attriloop INSTANCE;
 }
 -keepclassmembers class io.attriloop.sdk.Attriloop {
-    public static *** getAttriloopId();
+    public static *** getAttriloopId(...);
     public static void getAttriloopId$annotations();
     public static *** configure(...);
     public static *** configure$default(...);
@@ -30,7 +30,17 @@
     public static *** handleDeepLink(...);
     public static *** getDeepLink();
     public static *** onDeepLink(...);
+    public static *** setUserAttributes(...);
+    public static *** setUserAttributes$default(...);
+    public static *** clearUserAttributes();
+    # Suspend + callback forms (static via @JvmStatic, plus the INSTANCE bridge).
+    public *** awaitAttributionParams(...);
+    public *** getRevenueCatAttributes(...);
+    public *** getRevenueCatAttributes$default(...);
 }
+
+# Instantiated by the framework from the merged manifest (pre-configure install id).
+-keep class io.attriloop.sdk.AttriloopInitProvider { <init>(); }
 
 -keep class io.attriloop.sdk.AttriloopEvent { *; }
 -keepclassmembers enum io.attriloop.sdk.AttriloopEvent { *; }

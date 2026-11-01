@@ -2,6 +2,18 @@
     <!-- The SDK posts events to the edge over HTTPS. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <application>
+        <!--
+          Captures the application context at process start so getAttriloopId() works
+          before configure(). Stores the context only; no I/O. Hosts may remove it with
+          tools:node="remove" and call Attriloop.getAttriloopId(context) instead.
+        -->
+        <provider
+            android:name="io.attriloop.sdk.AttriloopInitProvider"
+            android:authorities="${applicationId}.attriloop-init"
+            android:exported="false" />
+    </application>
+
     <!--
       App Links (open-if-installed) are configured by the HOST app, not this library
       (it can't know the host's edge host or linkToken). In the host's launch Activity,

@@ -24,6 +24,8 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 /** Standard event types. INSTALL is emitted by the backend on first-open. */
 enum class AttriloopEvent(val raw: String) {
@@ -79,11 +81,24 @@ object Attriloop {
     internal const val BATCH_SIZE = 25
     /** Play Services can cold-start slowly; bound first-open latency at this many seconds. */
     internal const val REFERRER_FALLBACK_SECONDS = 8L
-    private const val SDK_VERSION = "android/0.2.1"
+    internal const val SDK_VERSION = "android/0.3.0"
+    /** Sent on every request so the edge can tell SDK generations apart. */
+    internal const val SDK_HEADER = "X-Attriloop-SDK"
     private const val DEFAULT_BASE_URL = "https://api.attriloop.com"
+    /** RevenueCat custom attribute values are capped at 500 characters. */
+    private const val REVENUECAT_VALUE_MAX = 500
 
     private val io = Executors.newSingleThreadScheduledExecutor()
     private lateinit var prefs: SharedPreferences
+    /** SharedPreferences file; tests use an isolated one. */
+    @Volatile
+    private var prefsName = PREFS
+    /** Application context from [AttriloopInitProvider], [getAttriloopId] or [configure]. */
+    @Volatile
+    private var appContext: Context? = null
+    @Volatile
+    private var idCache: String? = null
+    private val idLock = Any()
     private var apiKey = ""
     private var baseUrl = DEFAULT_BASE_URL
     private var debug = false
@@ -102,18 +117,24 @@ object Attriloop {
     @Volatile
     private var attribution: Map<String, Any?> = emptyMap()
     @Volatile
-    private var matchStatus: AttriloopMatchStatus = AttriloopMatchStatus.skipped
+    private var matchStatus: AttriloopMatchStatus = AttriloopMatchStatus.notConfigured
     /** Last non-empty string Play returned. Null until then. Never a host-supplied value. */
     @Volatile
     private var playInstallReferrer: String? = null
+    /** Tests only: false makes [configure] restore state without referrer, install or network. */
     @Volatile
-    private var pollHeardPending = false
+    internal var configureSideEffects = true
+
+    /** Poll schedule after the first request (~30 s in total). Tests shorten it. */
     @Volatile
-    private var pollTransportFailed = false
+    internal var pollDelaysMs = longArrayOf(2000, 4000, 8000, 16000)
 
     // Async attribution waiters, flushed once the poll chain resolves or gives up.
+    // `handlers` / `attributionHandlers` are host callbacks (delivered on main);
+    // `rawHandlers` are internal (suspend + RevenueCat helper) and run inline on `io`.
     private val handlers = ArrayList<(Map<String, Any?>) -> Unit>()
     private val attributionHandlers = ArrayList<(AttriloopAttribution) -> Unit>()
+    private val rawHandlers = ArrayList<(Map<String, Any?>) -> Unit>()
 
     // Deferred deep-link destination (`deep_link_value`) + its subscribers.
     //
@@ -143,18 +164,63 @@ object Attriloop {
     private var pendingReferrerUpdate: PlayReferrerHandoff? = null
 
     /**
-     * Public install id. The host sets RevenueCat custom subscriber attribute
-     * `attriloopId` from this value **before the paywall**. This SDK does not
-     * depend on RevenueCat — the host wires the two. Skipping that attribute
-     * records the purchase and does not pay the creator.
+     * Stable install id (`getAttriloopId()` from Java). Minted and persisted on the
+     * first read, even before `configure`, using the context captured by
+     * [AttriloopInitProvider]. `configure` keeps the same id. Returns "" only when no
+     * context is known yet (the host removed the provider and has not called
+     * `configure` or [getAttriloopId] with a context); that case logs in debug.
+     *
+     * RevenueCat: use [getRevenueCatAttributes], which sets `attriloop_id`.
      */
     @JvmStatic
-    var attriloopId: String = ""
-        private set
+    val attriloopId: String
+        get() {
+            idCache?.let { return it }
+            val context = appContext
+            if (context == null) {
+                if (debug) println("[Attriloop] attriloopId read before a context is known — call getAttriloopId(context)")
+                return ""
+            }
+            return mintId(context)
+        }
 
-    /** The host app's own user id, once set via [setCustomerUserId]; attached to every request. */
+    /**
+     * Install id for hosts that removed [AttriloopInitProvider]: mints and persists
+     * the id with [context] before `configure`. Same id as [attriloopId].
+     */
+    @JvmStatic
+    fun getAttriloopId(context: Context): String {
+        attachContext(context)
+        return mintId(context.applicationContext ?: context)
+    }
+
+    /** Remember the application context (provider, configure, getAttriloopId). */
+    internal fun attachContext(context: Context) {
+        if (appContext == null) appContext = context.applicationContext ?: context
+    }
+
+    private fun mintId(context: Context): String = synchronized(idLock) {
+        idCache?.let { return it }
+        val store = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val id = store.getString(ID_KEY, null)?.takeIf { it.isNotEmpty() }
+            ?: UUID.randomUUID().toString().also { store.edit().putString(ID_KEY, it).commit() }
+        idCache = id
+        id
+    }
+
+    /** Prefs once configured, else from the captured context, else null. */
+    private fun storageOrNull(): SharedPreferences? {
+        if (::prefs.isInitialized && apiKey.isNotEmpty()) return prefs
+        appContext?.let { return it.getSharedPreferences(prefsName, Context.MODE_PRIVATE) }
+        return if (::prefs.isInitialized) prefs else null
+    }
+
+    /** The host app's own user id, once set via [setCustomerUserId]; stamped on every request at send time. */
     @Volatile
     private var customerUserId: String? = null
+    /** Set before configure without any storage: persisted by configure instead of reloaded. */
+    @Volatile
+    private var customerUserIdUnsaved = false
 
     // Foreground tracking for the automatic APP_OPEN event: one per cold start, then one
     // each time the app returns from background (all Activities stopped → one started).
@@ -164,17 +230,16 @@ object Attriloop {
     @JvmStatic
     @JvmOverloads
     fun configure(context: Context, apiKey: String, baseUrl: String? = null, debug: Boolean = false) {
-        val app = context.applicationContext
-        this.prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val app = context.applicationContext ?: context
+        attachContext(app)
+        this.prefs = app.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         this.apiKey = apiKey
         this.packageName = app.packageName
         this.baseUrl = DEFAULT_BASE_URL
         if (baseUrl != null && isAllowedBaseUrl(baseUrl, debug)) this.baseUrl = baseUrl.trimEnd('/')
         this.debug = debug
 
-        this.attriloopId = prefs.getString(ID_KEY, null) ?: UUID.randomUUID().toString().also {
-            prefs.edit().putString(ID_KEY, it).apply()
-        }
+        mintId(app) // same id as any read before configure
         prefs.getString(ATTR_KEY, null)?.let {
             // Corrupt persisted cache must never crash the host app at startup.
             try {
@@ -192,8 +257,14 @@ object Attriloop {
         // it NOT pending: a value from a previous launch is already-consumed and must
         // not re-fire onDeepLink (see the once-only note on deepLinkPending).
         deepLink = prefs.getString(DEEPLINK_KEY, null)
-        customerUserId = prefs.getString(CUSTOMER_USER_ID_KEY, null)
+        if (customerUserIdUnsaved) {
+            persistCustomerUserId(customerUserId)
+            customerUserIdUnsaved = false
+        } else {
+            customerUserId = prefs.getString(CUSTOMER_USER_ID_KEY, null)
+        }
         restorePlayInstallReferrerFromPrefs()
+        if (!configureSideEffects) return // tests: restore only, no referrer/network
         registerForegroundTracking(app)
 
         // INSTALLED_KEY is committed only after the install POST succeeds (sendInstall),
@@ -202,26 +273,52 @@ object Attriloop {
         if (!prefs.getBoolean(INSTALLED_KEY, false)) {
             fetchReferrerThenInstall(app)
         }
-        fetchAttribution(0)
+        pollOnLaunch()
         flushQueue() // re-send any events buffered offline in a previous session
         sendAppOpen() // cold start counts as the first open of this process
     }
 
     /**
-     * Attach the host app's own user id to every install/event from now on (and persist
-     * it across launches). Lets the customer join Attriloop installs with their users and
-     * with RevenueCat without manual reconciliation. Pass null to clear. Values are
-     * trimmed and capped at 128 characters; never pass an email or phone here — use the
-     * hashed advanced-matching parameters on sendEvent for that.
+     * Attach the host app's own user id to every request from now on (persisted across
+     * launches). Works before and after `configure`, from any thread; last write wins.
+     * It is stamped at send time, so events queued offline without an id get it too;
+     * events that already carry one keep theirs. Null or blank clears it. Values are
+     * trimmed and capped at 128 characters. A value that looks like an email or phone
+     * number is refused (the previous value is kept) — send those hashed through
+     * [setUserAttributes] instead.
      */
     @JvmStatic
     fun setCustomerUserId(id: String?) {
-        if (!isConfigured("setCustomerUserId")) return
+        if (looksLikeContactDetail(id)) {
+            if (debug) {
+                println("[Attriloop] setCustomerUserId refused a value that looks like an email or phone number — use setUserAttributes(email = …, phoneNumber = …), which hashes it on the device")
+            }
+            return
+        }
         val normalized = normalizeCustomerUserId(id)
         customerUserId = normalized
-        prefs.edit().apply {
-            if (normalized == null) remove(CUSTOMER_USER_ID_KEY) else putString(CUSTOMER_USER_ID_KEY, normalized)
+        if (storageOrNull() == null) {
+            customerUserIdUnsaved = true
+            return
+        }
+        persistCustomerUserId(normalized)
+    }
+
+    private fun persistCustomerUserId(value: String?) {
+        val store = storageOrNull() ?: return
+        store.edit().apply {
+            if (value == null) remove(CUSTOMER_USER_ID_KEY) else putString(CUSTOMER_USER_ID_KEY, value)
         }.apply()
+    }
+
+    private val emailPattern = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+
+    /** Email, or 7–15 digits after stripping `+ - ( )` and spaces. Pure; for tests. */
+    internal fun looksLikeContactDetail(id: String?): Boolean {
+        val trimmed = id?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        if (emailPattern.matches(trimmed)) return true
+        val digits = trimmed.filterNot { it == '+' || it == '-' || it == '(' || it == ')' || it == ' ' }
+        return digits.length in 7..15 && digits.all { it in '0'..'9' }
     }
 
     /** Trim, drop empties and cap at [CUSTOMER_USER_ID_MAX]. Pure; for tests. */
@@ -312,6 +409,17 @@ object Attriloop {
     }
 
     /**
+     * Send-time stamping: a queued item without `customerUserId` gets the current one.
+     * An item that already carries one keeps it (it belongs to the user logged in when
+     * it was recorded). Returns a copy; the persisted queue is untouched.
+     */
+    internal fun stampedForSend(item: JSONObject): JSONObject {
+        val id = customerUserId ?: return item
+        if (item.optString("customerUserId", "").isNotEmpty()) return item
+        return JSONObject(item.toString()).put("customerUserId", id)
+    }
+
+    /**
      * Automatic APP_OPEN: once per cold start (from configure) and once per return to
      * the foreground. The backend dedupes per subject per UTC day for active-user
      * counts, so an occasional extra open is harmless; a missing one is not.
@@ -324,8 +432,7 @@ object Attriloop {
                 .put("appId", packageName)
                 .put("event", AttriloopEvent.APP_OPEN.raw)
                 .put("eid", UUID.randomUUID().toString())
-                .put("eventTime", eventTime)
-                .withCustomerUserId(),
+                .put("eventTime", eventTime),
         )
         flushQueue()
     }
@@ -386,6 +493,15 @@ object Attriloop {
             if (debug) println("[Attriloop] CUSTOM event requires a non-empty name — event dropped")
             return
         }
+        // Appstack-style CUSTOM `user_attributes`: hashed match keys, never an in-app event.
+        if (event == AttriloopEvent.CUSTOM && name == UserAttributes.EVENT_NAME) {
+            if (parameters?.get("clear") == true) {
+                enqueueUserAttributes(JSONObject().put("clear", true))
+            } else {
+                enqueueUserAttributeHashes(UserAttributes.hashes(UserAttributes.fromParameters(parameters.orEmpty())))
+            }
+            return
+        }
         // SimpleDateFormat is NOT thread-safe and sendEvent runs on arbitrary caller
         // threads — synchronize access to the shared formatter.
         val eventTime = synchronized(iso) { iso.format(Date()) }
@@ -395,10 +511,75 @@ object Attriloop {
             .put("event", event.raw)
             .put("eid", UUID.randomUUID().toString()) // idempotency key; backend dedupes retries
             .put("eventTime", eventTime)
-            .withCustomerUserId()
         if (name != null) item.put("name", name)
         if (parameters != null) item.put("parameters", JSONObject(sanitizedParameters(parameters)))
         enqueue(item)
+        flushQueue()
+    }
+
+    /**
+     * Customer match keys for ad-network matching (Meta Conversions API, TikTok Events
+     * API). Each value is normalized and SHA-256 hashed on the device before it is
+     * queued; plaintext is never persisted or sent. Phone yields one hash per network
+     * (`ph_meta`, `ph_tiktok`). A value that cannot be normalized is dropped without
+     * dropping the others. A full [name] is split on its first space; explicit
+     * [firstName] / [lastName] win. Date of birth: `YYYY-MM-DD`, `YYYY/MM/DD` or
+     * `YYYYMMDD`. Gender: `m`/`male`/`f`/`female`. A 64-hex value is treated as
+     * already hashed.
+     *
+     * The host needs its own consent basis before calling this (there is no gate on
+     * Android). Requires `configure`. The edge keeps only the latest hash per field.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun setUserAttributes(
+        email: String? = null,
+        firstName: String? = null,
+        lastName: String? = null,
+        name: String? = null,
+        phoneNumber: String? = null,
+        dateOfBirth: String? = null,
+        gender: String? = null,
+    ) {
+        if (!isConfigured("setUserAttributes")) return
+        enqueueUserAttributeHashes(
+            UserAttributes.hashes(
+                UserAttributes.Input(email, firstName, lastName, name, phoneNumber, dateOfBirth, gender),
+            ),
+        )
+    }
+
+    /** Delete this install's stored match keys on the edge (for example on logout). */
+    @JvmStatic
+    fun clearUserAttributes() {
+        if (!isConfigured("clearUserAttributes")) return
+        enqueueUserAttributes(JSONObject().put("clear", true))
+    }
+
+    private fun enqueueUserAttributeHashes(hashes: Map<String, String>) {
+        if (hashes.isEmpty()) {
+            if (debug) println("[Attriloop] setUserAttributes: no usable value — nothing sent")
+            return
+        }
+        val parameters = JSONObject()
+        for ((key, value) in hashes) parameters.put(key, value)
+        enqueueUserAttributes(parameters)
+    }
+
+    /** Queue one `CUSTOM` `user_attributes` item (hashes or `clear`) and flush. */
+    private fun enqueueUserAttributes(parameters: JSONObject) {
+        if (!isConfigured("setUserAttributes")) return
+        val eventTime = synchronized(iso) { iso.format(Date()) }
+        enqueue(
+            JSONObject()
+                .put("attriloopId", attriloopId)
+                .put("appId", packageName)
+                .put("event", AttriloopEvent.CUSTOM.raw)
+                .put("name", UserAttributes.EVENT_NAME)
+                .put("eid", UUID.randomUUID().toString())
+                .put("eventTime", eventTime)
+                .put("parameters", parameters),
+        )
         flushQueue()
     }
 
@@ -640,7 +821,7 @@ object Attriloop {
                 return@execute
             }
             val sentEids = batch.map { it.getString("eid") }
-            val response = postForResponse("/v1/events", JSONObject().put("events", JSONArray(batch)))
+            val response = postForResponse("/v1/events", JSONObject().put("events", JSONArray(batch.map(::stampedForSend))))
             if (response == null) {
                 flushing.set(false) // network / exception → retry on next flush trigger
                 return@execute
@@ -670,7 +851,7 @@ object Attriloop {
 
     /** Legacy single-item delivery of the queue head via `POST /v1/event`. On `io`. */
     private fun sendHeadLegacy(head: JSONObject) {
-        val outcome = postOnce("/v1/event", head)
+        val outcome = postOnce("/v1/event", stampedForSend(head))
         if (outcome == Outcome.TRANSIENT) {
             flushing.set(false) // retry on next flush trigger
             return
@@ -780,16 +961,30 @@ object Attriloop {
     }
 
     // Note: `attriloopId` (a @JvmStatic property) already exposes `getAttriloopId()` to
-    // Java via its generated getter — a separate fun would clash on the JVM signature.
+    // Java via its generated getter; `getAttriloopId(context)` is the explicit overload.
 
-    /** Resolved attribution params (mediaSource, campaignName, linkId, …); empty until resolved.
-     *  An empty map is **not** organic; read [getMatchStatus] for why it is empty. */
+    /**
+     * Cached attribution params: legacy server fields (`mediaSource`, `campaignName`,
+     * `linkId`, …) plus the contract keys `attriloop_id`, `attriloop_adnetwork`,
+     * `attriloop_campaign`, `attriloop_adset`, `attriloop_ad`, `attriloop_match_status`,
+     * `attriloop_matching_type`, `attriloop_confidence` (absent when unknown). Before
+     * `configure` it is `attriloop_id` + `attriloop_match_status = not_configured`.
+     * Before the first decision it holds `attriloop_id` only; use [awaitAttributionParams]
+     * or the callback form to wait.
+     */
     @JvmStatic
-    fun getAttributionParams(): Map<String, Any?> = attribution
+    fun getAttributionParams(): Map<String, Any?> {
+        if (apiKey.isEmpty()) return notConfiguredParams()
+        val cached = attribution
+        val id = attriloopId
+        if (id.isEmpty() || cached[AttributionDecision.ID_KEY] == id) return cached
+        return LinkedHashMap(cached).apply { put(AttributionDecision.ID_KEY, id) }
+    }
 
-    /** Current decision lifecycle. `pending` until the server answers; never inferred as organic. */
+    /** Current decision lifecycle (`pending` while waiting; never inferred as organic). */
     @JvmStatic
-    fun getMatchStatus(): AttriloopMatchStatus = matchStatus
+    fun getMatchStatus(): AttriloopMatchStatus =
+        if (apiKey.isEmpty()) AttriloopMatchStatus.notConfigured else matchStatus
 
     /**
      * Raw Google Play Install Referrer string this process last received from Play, or
@@ -802,20 +997,22 @@ object Attriloop {
     fun getPlayInstallReferrer(): String? = playInstallReferrer
 
     /**
-     * Async variant: invokes [callback] on the main thread with the resolved params
-     * (or the current cache if already resolved). Always fires — even if attribution
-     * never resolves it is eventually called with whatever is cached. Mirrors the iOS
-     * completion API (`DispatchQueue.main`). Not configured → fires immediately with `emptyMap()`.
+     * Waits for the initial match, then invokes [callback] on the main thread with the
+     * params map (see [getAttributionParams]). Settled answers (`matched`,
+     * `matched_no_params`, `organic`, `skipped`) return from cache without waiting.
+     * Otherwise it joins the single poll chain (about 30 s); a timeout or transport
+     * failure yields `failed`, which is retried on the next call. Before `configure`
+     * it fires immediately with `not_configured`.
      */
     @JvmStatic
     fun getAttributionParams(callback: (Map<String, Any?>) -> Unit) {
         if (apiKey.isEmpty()) {
-            matchStatus = AttriloopMatchStatus.skipped
-            dispatchToMain { callback(emptyMap()) }
+            val params = notConfiguredParams()
+            dispatchToMain { callback(params) }
             return
         }
         if (shouldDeliverAttribution()) {
-            val snapshot = attribution
+            val snapshot = getAttributionParams()
             dispatchToMain { callback(snapshot) }
             return
         }
@@ -823,16 +1020,25 @@ object Attriloop {
         if (shouldDeliverAttribution()) flushHandlers() else fetchAttribution(0)
     }
 
+    /**
+     * Suspend form of [getAttributionParams] (stdlib `suspendCoroutine`, no coroutine
+     * library needed). Same wait, cache and retry rules.
+     */
+    @JvmStatic
+    suspend fun awaitAttributionParams(): Map<String, Any?> = suspendCoroutine { continuation ->
+        awaitParamsRaw { continuation.resume(it) }
+    }
+
     /** Status plus params, same delivery schedule as [getAttributionParams]. */
     @JvmStatic
     fun getAttribution(callback: (AttriloopAttribution) -> Unit) {
         if (apiKey.isEmpty()) {
-            matchStatus = AttriloopMatchStatus.skipped
-            dispatchToMain { callback(AttriloopAttribution(AttriloopMatchStatus.skipped, emptyMap())) }
+            val result = AttriloopAttribution(AttriloopMatchStatus.notConfigured, notConfiguredParams())
+            dispatchToMain { callback(result) }
             return
         }
         if (shouldDeliverAttribution()) {
-            val snapshot = AttriloopAttribution(matchStatus, attribution)
+            val snapshot = AttriloopAttribution(matchStatus, getAttributionParams())
             dispatchToMain { callback(snapshot) }
             return
         }
@@ -840,30 +1046,115 @@ object Attriloop {
         if (shouldDeliverAttribution()) flushHandlers() else fetchAttribution(0)
     }
 
+    /**
+     * Attributes for RevenueCat `Purchases.sharedInstance.setAttributes(...)`, set
+     * before the paywall. Waits for the match up to [timeoutMs] (the shared poll keeps
+     * running after a timeout). Always has `attriloop_id` and `attriloop_match_status`;
+     * the other `attriloop_*` keys only when known. RevenueCat's reserved
+     * `$mediaSource`, `$campaign`, `$adGroup` and `$ad` are set only for a `matched`
+     * install, because RevenueCat never lets them change once set. Values are cut to
+     * 500 characters. On timeout: `attriloop_id` + `failed`. The SDK does not depend
+     * on RevenueCat.
+     */
+    @JvmStatic
+    suspend fun getRevenueCatAttributes(timeoutMs: Long = 5_000): Map<String, String> =
+        suspendCoroutine { continuation -> revenueCatAttributesRaw(timeoutMs) { continuation.resume(it) } }
+
+    /** Callback form of [getRevenueCatAttributes]; [callback] runs on the main thread. */
+    @JvmStatic
+    @JvmOverloads
+    fun getRevenueCatAttributes(timeoutMs: Long = 5_000, callback: (Map<String, String>) -> Unit) {
+        revenueCatAttributesRaw(timeoutMs) { attrs -> dispatchToMain { callback(attrs) } }
+    }
+
+    /** RevenueCat map, delivered once (inline, on the SDK thread or the caller). */
+    private fun revenueCatAttributesRaw(timeoutMs: Long, deliver: (Map<String, String>) -> Unit) {
+        val done = AtomicBoolean(false)
+        val finish: (Map<String, Any?>) -> Unit = { params ->
+            if (done.compareAndSet(false, true)) deliver(revenueCatAttributes(params))
+        }
+        if (apiKey.isEmpty() || shouldDeliverAttribution()) {
+            finish(getAttributionParams())
+            return
+        }
+        io.schedule({
+            val id = attriloopId
+            finish(
+                linkedMapOf<String, Any?>(AttributionDecision.STATUS_KEY to AttriloopMatchStatus.failed.raw).apply {
+                    if (id.isNotEmpty()) put(AttributionDecision.ID_KEY, id)
+                },
+            )
+        }, timeoutMs.coerceAtLeast(0), TimeUnit.MILLISECONDS)
+        awaitParamsRaw(finish)
+    }
+
+    /** Build the RevenueCat map from a params map. Pure; for tests. */
+    internal fun revenueCatAttributes(params: Map<String, Any?>): Map<String, String> {
+        fun value(key: String) = (params[key] as? String)?.takeIf { it.isNotBlank() }?.take(REVENUECAT_VALUE_MAX)
+        val out = LinkedHashMap<String, String>()
+        value(AttributionDecision.ID_KEY)?.let { out[AttributionDecision.ID_KEY] = it }
+        val status = value(AttributionDecision.STATUS_KEY) ?: AttriloopMatchStatus.failed.raw
+        out[AttributionDecision.STATUS_KEY] = status
+        for (key in AttributionDecision.OPTIONAL_KEYS) value(key)?.let { out[key] = it }
+        if (status == AttriloopMatchStatus.matched.raw) {
+            value("attriloop_adnetwork")?.let { out["\$mediaSource"] = it }
+            value("attriloop_campaign")?.let { out["\$campaign"] = it }
+            value("attriloop_adset")?.let { out["\$adGroup"] = it }
+            value("attriloop_ad")?.let { out["\$ad"] = it }
+        }
+        return out
+    }
+
+    /** Internal waiter: settled → now; otherwise join or start the poll chain. */
+    private fun awaitParamsRaw(deliver: (Map<String, Any?>) -> Unit) {
+        if (apiKey.isEmpty() || shouldDeliverAttribution()) {
+            deliver(getAttributionParams())
+            return
+        }
+        synchronized(rawHandlers) { rawHandlers.add(deliver) }
+        if (shouldDeliverAttribution()) flushHandlers() else fetchAttribution(0)
+    }
+
+    /** `attriloop_id` (minted when a context is known) + `not_configured`. */
+    private fun notConfiguredParams(): Map<String, Any?> {
+        val id = attriloopId
+        return linkedMapOf<String, Any?>(
+            AttributionDecision.STATUS_KEY to AttriloopMatchStatus.notConfigured.raw,
+        ).apply { if (id.isNotEmpty()) put(AttributionDecision.ID_KEY, id) }
+    }
+
+    /** Settled answers are served from cache; `failed` / `pending` wait (and retry). */
     private fun shouldDeliverAttribution(): Boolean = when (matchStatus) {
         AttriloopMatchStatus.matched,
+        AttriloopMatchStatus.matchedNoParams,
         AttriloopMatchStatus.organic,
         AttriloopMatchStatus.ambiguous,
-        AttriloopMatchStatus.failed,
         AttriloopMatchStatus.skipped,
         -> true
-        AttriloopMatchStatus.pending -> false
+        AttriloopMatchStatus.failed,
+        AttriloopMatchStatus.pending,
+        AttriloopMatchStatus.notConfigured,
+        -> false
     }
 
     private fun flushHandlers() {
-        val params = attribution
+        val params = getAttributionParams()
         val result = AttriloopAttribution(matchStatus, params)
         val paramWaiters: List<(Map<String, Any?>) -> Unit>
         val statusWaiters: List<(AttriloopAttribution) -> Unit>
+        val rawWaiters: List<(Map<String, Any?>) -> Unit>
         synchronized(handlers) {
             paramWaiters = if (handlers.isEmpty()) emptyList() else ArrayList(handlers).also { handlers.clear() }
         }
         synchronized(attributionHandlers) {
             statusWaiters = if (attributionHandlers.isEmpty()) emptyList() else ArrayList(attributionHandlers).also { attributionHandlers.clear() }
         }
-        if (paramWaiters.isEmpty() && statusWaiters.isEmpty()) return
+        synchronized(rawHandlers) {
+            rawWaiters = if (rawHandlers.isEmpty()) emptyList() else ArrayList(rawHandlers).also { rawHandlers.clear() }
+        }
         paramWaiters.forEach { callback -> dispatchToMain { callback(params) } }
         statusWaiters.forEach { callback -> dispatchToMain { callback(result) } }
+        rawWaiters.forEach { callback -> invokeSafely { callback(params) } }
     }
 
     /** Host callbacks must not kill the app; iOS delivers these on the main queue. */
@@ -1195,33 +1486,47 @@ object Attriloop {
         }
     }
 
-    /** Poll until attribution resolves (it runs async on the backend), backing off. */
-    private fun fetchAttribution(attempt: Int) {
-        if (apiKey.isEmpty() || attriloopId.isEmpty()) {
-            if (apiKey.isEmpty()) matchStatus = AttriloopMatchStatus.skipped
+    /**
+     * Launch poll. Not settled yet, or `failed` last time → the full wait chain. A
+     * settled answer whose legacy `terminal` was false (an upgrade is still possible:
+     * late Play referrer, late resolve, referral claim) → one request, which replaces
+     * the cache only when it brings a decision. Settled and final → no request.
+     */
+    private fun pollOnLaunch() {
+        if (!shouldDeliverAttribution()) {
+            fetchAttribution(0)
             return
         }
+        if (AttributionDecision.decide(attribution).repollNextLaunch) fetchAttribution(0, single = true)
+    }
+
+    /**
+     * Poll `GET /v1/attribution` until the server reports a decision (immediately, then
+     * after 2/4/8/16 s ≈ 30 s). One chain at a time; concurrent waiters join it. A chain
+     * that ends without a decision keeps a settled cache, otherwise yields `failed`.
+     */
+    private fun fetchAttribution(attempt: Int, single: Boolean = false) {
+        if (apiKey.isEmpty()) return
         if (attempt == 0 && !polling.compareAndSet(false, true)) return // a chain already runs
-        if (attempt == 0) {
-            pollHeardPending = false
-            pollTransportFailed = false
-        }
-        val delays = longArrayOf(2000, 4000, 8000, 16000)
+        val delays = pollDelaysMs
         io.execute {
-            val enc = URLEncoder.encode(attriloopId, "UTF-8")
+            val id = attriloopId
+            if (id.isEmpty()) {
+                polling.set(false)
+                return@execute
+            }
+            val enc = URLEncoder.encode(id, "UTF-8")
             val json = get("/v1/attribution?attriloopId=$enc")
             if (json != null) {
-                val (status, keepPolling) = AttriloopMatchStatus.interpret(
-                    json.optString("matchStatus").takeIf { json.has("matchStatus") && it.isNotEmpty() },
-                    if (json.has("terminal") && !json.isNull("terminal")) json.optBoolean("terminal") else null,
-                    json.optString("status").takeIf { json.has("status") && it.isNotEmpty() },
-                )
-                if (!keepPolling) {
-                    attribution = jsonToMap(json)
-                    matchStatus = status
+                val body = jsonToMap(json)
+                val decision = AttributionDecision.decide(body)
+                if (decision.settled) {
+                    val merged = AttributionDecision.merge(body, decision, id)
+                    attribution = merged
+                    matchStatus = decision.status
                     prefs.edit()
-                        .putString(ATTR_KEY, json.toString())
-                        .putString(MATCH_STATUS_KEY, status.raw)
+                        .putString(ATTR_KEY, JSONObject(merged).toString())
+                        .putString(MATCH_STATUS_KEY, decision.status.raw)
                         .apply()
                     polling.set(false)
                     val dlv = json.optString("deep_link_value", "")
@@ -1231,25 +1536,27 @@ object Attriloop {
                         } else {
                             null
                         }
-                        if (AttriloopMatchStatus.shouldApplyDeepLink(apply, status)) setDeepLink(dlv)
+                        if (AttriloopMatchStatus.shouldApplyDeepLink(apply, decision.status)) setDeepLink(dlv)
                     }
                     flushHandlers()
                     return@execute
                 }
-                pollHeardPending = true
-            } else {
-                pollTransportFailed = true
             }
-            if (attempt < delays.size) {
+            if (!single && attempt < delays.size) {
                 io.schedule({ fetchAttribution(attempt + 1) }, delays[attempt], TimeUnit.MILLISECONDS)
             } else {
                 polling.set(false)
                 if (!shouldDeliverAttribution()) {
-                    matchStatus = when {
-                        pollHeardPending -> AttriloopMatchStatus.pending
-                        pollTransportFailed -> AttriloopMatchStatus.failed
-                        else -> AttriloopMatchStatus.pending
-                    }
+                    // Timeout or transport failure: `failed`, retried on the next call/launch.
+                    attribution = linkedMapOf(
+                        AttributionDecision.ID_KEY to id,
+                        AttributionDecision.STATUS_KEY to AttriloopMatchStatus.failed.raw,
+                    )
+                    matchStatus = AttriloopMatchStatus.failed
+                    prefs.edit()
+                        .remove(ATTR_KEY)
+                        .putString(MATCH_STATUS_KEY, AttriloopMatchStatus.failed.raw)
+                        .apply()
                 }
                 flushHandlers()
             }
@@ -1356,6 +1663,7 @@ object Attriloop {
             conn.connectTimeout = 10_000
             conn.readTimeout = 10_000
             conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            conn.setRequestProperty(SDK_HEADER, SDK_VERSION)
             return block(conn)
         } finally {
             conn.disconnect()
@@ -1396,19 +1704,57 @@ object Attriloop {
         io.submit { }.get(5, TimeUnit.SECONDS)
     }
 
-    /** Init prefs + identity without Play Referrer, polling, or network. */
-    internal fun attachPersistenceForTest(context: Context) {
+    /**
+     * Init prefs + identity without Play Referrer, polling, or network. With [baseUrl]
+     * (a local MockWebServer) the SDK talks to it; debug allows plain-HTTP localhost.
+     */
+    internal fun attachPersistenceForTest(context: Context, baseUrl: String? = null) {
         resetForTest()
         val app = context.applicationContext
-        prefs = app.getSharedPreferences("$PREFS.test", Context.MODE_PRIVATE)
+        prefsName = "$PREFS.test"
+        appContext = app
+        prefs = app.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
         apiKey = "at_test"
         debug = true
         packageName = app.packageName
-        attriloopId = "test-attriloop-id"
+        if (baseUrl != null) this.baseUrl = baseUrl.trimEnd('/')
+        idCache = "test-attriloop-id"
         matchStatus = AttriloopMatchStatus.pending
         playInstallReferrer = null
-        prefs.edit().putString(ID_KEY, attriloopId).commit()
+        prefs.edit().putString(ID_KEY, "test-attriloop-id").commit()
+    }
+
+    /** Unconfigured state with an isolated prefs file and an optional captured context. */
+    internal fun detachForTest(context: Context?) {
+        resetForTest()
+        prefsName = "$PREFS.test"
+        context?.applicationContext?.getSharedPreferences(prefsName, Context.MODE_PRIVATE)?.edit()?.clear()?.commit()
+        appContext = context?.applicationContext
+    }
+
+    /** Run the configure-time restore + launch poll against the current test prefs. */
+    internal fun relaunchForTest() {
+        awaitIo()
+        attribution = prefs.getString(ATTR_KEY, null)?.let { jsonToMap(JSONObject(it)) } ?: emptyMap()
+        matchStatus = AttriloopMatchStatus.restored(true, prefs.getString(MATCH_STATUS_KEY, null), attribution)
+        polling.set(false)
+        pollOnLaunch()
+    }
+
+    internal fun installBodyForTest(): JSONObject = installBody(null, "new_install")
+
+    internal fun queuedItemsForTest(): String = readQueue().toString()
+
+    internal fun persistedQueueRawForTest(): String? = prefs.getString(QUEUE_KEY, null)
+
+    /** Drain the queue once (batch path) and wait for the chain to finish. */
+    internal fun flushAndAwaitForTest(timeoutMs: Long = 5_000) {
+        awaitIo()
+        flushQueue()
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (flushing.get() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        awaitIo()
     }
 
     /** Drop in-memory + on-disk SDK state so later tests (and the pure JVM suite) stay isolated. */
@@ -1422,15 +1768,18 @@ object Attriloop {
         debug = false
         baseUrl = DEFAULT_BASE_URL
         packageName = ""
-        attriloopId = ""
+        idCache = null
+        appContext = null
         customerUserId = null
+        customerUserIdUnsaved = false
         attribution = emptyMap()
-        matchStatus = AttriloopMatchStatus.skipped
+        matchStatus = AttriloopMatchStatus.notConfigured
         playInstallReferrer = null
-        pollHeardPending = false
-        pollTransportFailed = false
+        pollDelaysMs = longArrayOf(2000, 4000, 8000, 16000)
+        configureSideEffects = true
         synchronized(handlers) { handlers.clear() }
         synchronized(attributionHandlers) { attributionHandlers.clear() }
+        synchronized(rawHandlers) { rawHandlers.clear() }
         deepLink = null
         deepLinkPending = false
         synchronized(deepLinkHandlers) { deepLinkHandlers.clear() }
@@ -1441,10 +1790,11 @@ object Attriloop {
         flushing.set(false)
         batchUnsupported = false
         if (::prefs.isInitialized) prefs.edit().clear().commit()
+        prefsName = PREFS
     }
 
     internal fun persistedCustomerUserId(): String? =
-        if (::prefs.isInitialized) prefs.getString(CUSTOMER_USER_ID_KEY, null) else null
+        storageOrNull()?.getString(CUSTOMER_USER_ID_KEY, null)
 
     internal fun enqueueForTest(item: JSONObject) {
         enqueue(item)
@@ -1480,14 +1830,10 @@ object Attriloop {
     }
 
     internal fun setAttributionForTest(value: Map<String, Any?>) {
-        attribution = value
-        val (status, keepPolling) = AttriloopMatchStatus.interpret(
-            value["matchStatus"] as? String,
-            value["terminal"] as? Boolean,
-            value["status"] as? String,
-        )
+        val decision = AttributionDecision.decide(value)
+        attribution = if (decision.settled) AttributionDecision.merge(value, decision, attriloopId) else value
         matchStatus = when {
-            !keepPolling -> status
+            decision.settled -> decision.status
             value.isNotEmpty() -> AttriloopMatchStatus.matched
             else -> AttriloopMatchStatus.pending
         }

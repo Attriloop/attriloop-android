@@ -342,10 +342,13 @@ class AttriloopTest {
         assertNull(Attriloop.referralClaimError("{"))
     }
 
-    @Test fun unconfiguredMatchStatusIsSkippedNotOrganic() {
+    @Test fun unconfiguredMatchStatusIsNotConfiguredNotSkipped() {
         Attriloop.resetForTest()
-        assertEquals(AttriloopMatchStatus.skipped, Attriloop.getMatchStatus())
-        assertTrue(Attriloop.getAttributionParams().isEmpty())
+        assertEquals(AttriloopMatchStatus.notConfigured, Attriloop.getMatchStatus())
+        assertEquals(
+            mapOf("attriloop_match_status" to "not_configured"),
+            Attriloop.getAttributionParams(),
+        )
     }
 
     @Test fun silenceFromServerIsPendingNeverOrganic() {
@@ -424,7 +427,7 @@ class AttriloopTest {
             AttriloopMatchStatus.restored(true, null, emptyMap()),
         )
         assertEquals(
-            AttriloopMatchStatus.skipped,
+            AttriloopMatchStatus.notConfigured,
             AttriloopMatchStatus.restored(false, "organic", emptyMap()),
         )
     }
