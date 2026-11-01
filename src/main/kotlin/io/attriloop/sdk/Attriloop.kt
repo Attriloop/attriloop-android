@@ -281,8 +281,8 @@ object Attriloop {
     /**
      * Attach the host app's own user id to every request from now on (persisted across
      * launches). Works before and after `configure`, from any thread; last write wins.
-     * It is stamped at send time, so events queued offline without an id get it too;
-     * events that already carry one keep theirs. Null or blank clears it. Values are
+     * Events carry the id set when they were recorded; queued events without one get
+     * the current id at send time. Null or blank clears it. Values are
      * trimmed and capped at 128 characters. A value that looks like an email or phone
      * number is refused (the previous value is kept) — send those hashed through
      * [setUserAttributes] instead.
@@ -432,7 +432,8 @@ object Attriloop {
                 .put("appId", packageName)
                 .put("event", AttriloopEvent.APP_OPEN.raw)
                 .put("eid", UUID.randomUUID().toString())
-                .put("eventTime", eventTime),
+                .put("eventTime", eventTime)
+                .withCustomerUserId(),
         )
         flushQueue()
     }
@@ -511,6 +512,7 @@ object Attriloop {
             .put("event", event.raw)
             .put("eid", UUID.randomUUID().toString()) // idempotency key; backend dedupes retries
             .put("eventTime", eventTime)
+            .withCustomerUserId() // the user logged in now; send time only fills items without one
         if (name != null) item.put("name", name)
         if (parameters != null) item.put("parameters", JSONObject(sanitizedParameters(parameters)))
         enqueue(item)

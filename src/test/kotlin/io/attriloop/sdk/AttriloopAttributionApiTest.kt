@@ -324,6 +324,31 @@ class AttriloopAttributionApiTest {
         assertTrue(sdkHeaders.all { it == "android/0.3.0" })
     }
 
+    @Test fun eventQueuedWhileLoggedInKeepsThatIdAfterLogout() {
+        attach()
+        server.shutdown() // offline: the event stays queued
+        Attriloop.setCustomerUserId("u_A")
+        Attriloop.sendEvent(AttriloopEvent.LOGIN)
+        Attriloop.flushAndAwaitForTest()
+        Attriloop.setCustomerUserId(null)
+        val queued = org.json.JSONArray(Attriloop.persistedQueueRawForTest()).getJSONObject(0)
+        assertEquals("u_A", queued.getString("customerUserId"))
+        assertEquals("u_A", Attriloop.stampedForSend(queued).getString("customerUserId"))
+    }
+
+    @Test fun eventQueuedWhileLoggedInIsSentWithThatIdAfterLogout() {
+        attach()
+        Attriloop.setCustomerUserId("u_A")
+        // Enqueue-time stamp, exactly as sendEvent writes it, without triggering a drain.
+        Attriloop.enqueueForTest(
+            JSONObject().put("eid", "e1").put("attriloopId", "x").put("appId", "a").put("event", "LOGIN")
+                .put("customerUserId", "u_A"),
+        )
+        Attriloop.setCustomerUserId(null)
+        Attriloop.flushAndAwaitForTest()
+        assertEquals("u_A", eventBodies.single().getString("customerUserId"))
+    }
+
     @Test fun blankOrNullClearsTheCustomerUserId() {
         attach()
         Attriloop.setCustomerUserId("u_42")

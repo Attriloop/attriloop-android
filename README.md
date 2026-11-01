@@ -66,7 +66,8 @@ Attriloop.setCustomerUserId(user.id)   // pass null (or "") on logout
 ```
 
 `setCustomerUserId` works before and after `configure`, from any thread; last write
-wins. It is stamped at **send** time, so events queued offline without an id get it.
+wins. Events carry the id set when they were recorded; events queued offline without one
+get the current id when they are sent.
 Values that look like an email or phone number are refused (the previous value is kept)
 — send those hashed through `setUserAttributes`.
 
@@ -219,7 +220,7 @@ the helper.
 - An install that is unattributed inside the referral-claim window now reports `organic`
   (it used to stay `pending`); a later upgrade still reaches the cache on relaunch.
 - `getAttriloopId()` no longer returns `""` before `configure` (init provider).
-- `setCustomerUserId` refuses emails and phone numbers and is stamped at send time.
+- `setCustomerUserId` refuses emails and phone numbers and works before `configure`; queued events without an id get it at send time.
 - Every request carries `X-Attriloop-SDK: android/0.3.0`.
 
 ## How attribution works
