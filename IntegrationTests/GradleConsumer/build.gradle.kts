@@ -22,6 +22,6 @@ android {
 }
 
 dependencies {
-    implementation("com.attriloop:attriloop-android:0.2.1")
+    implementation("com.attriloop:attriloop-android:0.3.0")
     testImplementation("junit:junit:4.13.2")
 }
