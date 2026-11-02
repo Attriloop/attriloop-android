@@ -193,6 +193,20 @@ internal data class AttributionDecision(
             return out
         }
 
+        /** A 0.2.x persisted cache: the raw legacy poll body, without contract keys. */
+        fun isLegacyCache(saved: Map<String, Any?>): Boolean = saved[STATUS_KEY] == null
+
+        /**
+         * The params map restored at configure. A 0.3.0+ cache is used as stored. A
+         * 0.2.x cache gets its contract keys rebuilt from the legacy fields, the same
+         * mapping as a legacy edge response; an unsettled one is kept as is.
+         */
+        fun restoredParams(saved: Map<String, Any?>, attriloopId: String): Map<String, Any?> {
+            if (!isLegacyCache(saved)) return saved
+            val decision = decide(saved)
+            return if (decision.settled) merge(saved, decision, attriloopId) else saved
+        }
+
         private fun settledOnly(status: AttriloopMatchStatus) =
             AttributionDecision(true, false, status, mapOf(STATUS_KEY to status.raw))
 

@@ -288,6 +288,63 @@ class AttriloopAttributionApiTest {
         assertEquals(1, attributionHits.get())
     }
 
+    // ── upgrade from 0.2.x ──────────────────────────────────────────────────
+
+    @Test fun legacy021CacheGainsContractKeysOnConfigure() {
+        Attriloop.detachForTest(app)
+        prefs().edit().putString(
+            "attribution",
+            JSONObject().put("matchMethod", "deeplink").put("mediaSource", "meta_ads")
+                .put("campaignName", "Spring Sale").put("matchStatus", "matched")
+                .put("terminal", true).put("status", "attributed").toString(),
+        ).commit()
+        Attriloop.configureSideEffects = false
+        Attriloop.configure(app, "at_test")
+        val params = Attriloop.getAttributionParams()
+        assertEquals("matched", params["attriloop_match_status"])
+        assertEquals("Spring Sale", params["attriloop_campaign"])
+        assertEquals("meta_ads", params["mediaSource"])
+        assertEquals(Attriloop.attriloopId, params["attriloop_id"])
+        assertEquals(AttriloopMatchStatus.matched, Attriloop.getMatchStatus())
+        assertEquals("Spring Sale", Attriloop.revenueCatAttributes(params)["\$campaign"])
+    }
+
+    @Test fun legacy021CachePollsOnceOnLaunchAndThenStaysSettled() {
+        attach()
+        prefs().edit().putString(
+            "attribution",
+            JSONObject().put("matchMethod", "deeplink").put("mediaSource", "meta_ads")
+                .put("campaignName", "Spring Sale").put("matchStatus", "matched")
+                .put("terminal", true).put("status", "attributed").toString(),
+        ).commit()
+        attributionBodies.add(MATCHED)
+        Attriloop.relaunchForTest()
+        Attriloop.awaitIo()
+        assertEquals(1, attributionHits.get())
+        assertEquals("US 18-34", Attriloop.getAttributionParams()["attriloop_adset"])
+        Attriloop.relaunchForTest()
+        Attriloop.awaitIo()
+        assertEquals(1, attributionHits.get())
+    }
+
+    @Test fun restoredParamsKeepsA030CacheAndAnUnsettledLegacyBody() {
+        val current = mapOf<String, Any?>("attriloop_match_status" to "organic", "attriloop_id" to "x")
+        assertEquals(current, AttributionDecision.restoredParams(current, "x"))
+        assertFalse(AttributionDecision.isLegacyCache(current))
+        val pending = mapOf<String, Any?>("matchStatus" to "pending", "terminal" to false)
+        assertTrue(AttributionDecision.isLegacyCache(pending))
+        assertEquals(pending, AttributionDecision.restoredParams(pending, "x"))
+    }
+
+    @Test fun synchronousGetterAlwaysCarriesTheStatusBeforeTheFirstDecision() {
+        Attriloop.detachForTest(app)
+        Attriloop.configureSideEffects = false
+        Attriloop.configure(app, "at_test")
+        val params = Attriloop.getAttributionParams()
+        assertEquals("failed", params["attriloop_match_status"])
+        assertEquals(Attriloop.attriloopId, params["attriloop_id"])
+    }
+
     // ── 5.5 customer user id ────────────────────────────────────────────────
 
     @Test fun customerUserIdSetBeforeConfigureReachesTheInstallBody() {

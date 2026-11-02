@@ -216,7 +216,12 @@ the helper.
 - Before `configure` the status is now `notConfigured` / `"not_configured"`. It used to
   be `skipped`, which now means "the server will not attempt a match". Update code that
   checked `.skipped` to detect a missing `configure`.
-- `getAttributionParams` adds the `attriloop_*` keys; legacy keys are unchanged.
+- `getAttributionParams` adds the `attriloop_*` keys; legacy keys are unchanged. It
+  always carries `attriloop_match_status` (`failed` before the first decision).
+- Apps upgrading from 0.2.x: an attribution cached by 0.2.x gets its `attriloop_*` keys
+  rebuilt on the first 0.3.0 launch, and the SDK polls once to fill the rest.
+- `AttriloopMatchStatus` gains `matchedNoParams` and `notConfigured`. A Kotlin `when`
+  over it without `else` must handle them.
 - An install that is unattributed inside the referral-claim window now reports `organic`
   (it used to stay `pending`); a later upgrade still reaches the cache on relaunch.
 - `getAttriloopId()` no longer returns `""` before `configure` (init provider).

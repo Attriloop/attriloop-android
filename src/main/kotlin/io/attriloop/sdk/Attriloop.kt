@@ -89,6 +89,13 @@ object Attriloop {
     private const val REVENUECAT_VALUE_MAX = 500
 
     private val io = Executors.newSingleThreadScheduledExecutor()
+    /**
+     * Caller-facing deadlines only. `io` runs blocking HTTP (up to 20 s per request), so a
+     * deadline queued there could fire far later than the host asked for.
+     */
+    private val timers = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "attriloop-timer").apply { isDaemon = true }
+    }
     private lateinit var prefs: SharedPreferences
     /** SharedPreferences file; tests use an isolated one. */
     @Volatile
@@ -116,6 +123,9 @@ object Attriloop {
 
     @Volatile
     private var attribution: Map<String, Any?> = emptyMap()
+    /** The cache restored at configure came from 0.2.x (no `attriloop_match_status`). */
+    @Volatile
+    private var upgradedLegacyCache = false
     @Volatile
     private var matchStatus: AttriloopMatchStatus = AttriloopMatchStatus.notConfigured
     /** Last non-empty string Play returned. Null until then. Never a host-supplied value. */
@@ -240,10 +250,13 @@ object Attriloop {
         this.debug = debug
 
         mintId(app) // same id as any read before configure
+        upgradedLegacyCache = false
         prefs.getString(ATTR_KEY, null)?.let {
             // Corrupt persisted cache must never crash the host app at startup.
             try {
-                attribution = jsonToMap(JSONObject(it))
+                val saved = jsonToMap(JSONObject(it))
+                upgradedLegacyCache = AttributionDecision.isLegacyCache(saved)
+                attribution = AttributionDecision.restoredParams(saved, attriloopId)
             } catch (e: Exception) {
                 if (debug) e.printStackTrace()
             }
@@ -971,16 +984,21 @@ object Attriloop {
      * `attriloop_campaign`, `attriloop_adset`, `attriloop_ad`, `attriloop_match_status`,
      * `attriloop_matching_type`, `attriloop_confidence` (absent when unknown). Before
      * `configure` it is `attriloop_id` + `attriloop_match_status = not_configured`.
-     * Before the first decision it holds `attriloop_id` only; use [awaitAttributionParams]
-     * or the callback form to wait.
+     * Before the first decision it holds `attriloop_id` and `attriloop_match_status =
+     * failed` (not resolved yet, same as iOS); use [awaitAttributionParams] or the
+     * callback form to wait.
      */
     @JvmStatic
     fun getAttributionParams(): Map<String, Any?> {
         if (apiKey.isEmpty()) return notConfiguredParams()
         val cached = attribution
         val id = attriloopId
-        if (id.isEmpty() || cached[AttributionDecision.ID_KEY] == id) return cached
-        return LinkedHashMap(cached).apply { put(AttributionDecision.ID_KEY, id) }
+        val hasStatus = cached[AttributionDecision.STATUS_KEY] != null
+        if (hasStatus && (id.isEmpty() || cached[AttributionDecision.ID_KEY] == id)) return cached
+        return LinkedHashMap(cached).apply {
+            if (id.isNotEmpty()) put(AttributionDecision.ID_KEY, id)
+            if (!hasStatus) put(AttributionDecision.STATUS_KEY, AttriloopMatchStatus.failed.raw)
+        }
     }
 
     /** Current decision lifecycle (`pending` while waiting; never inferred as organic). */
@@ -1079,7 +1097,7 @@ object Attriloop {
             finish(getAttributionParams())
             return
         }
-        io.schedule({
+        timers.schedule({
             val id = attriloopId
             finish(
                 linkedMapOf<String, Any?>(AttributionDecision.STATUS_KEY to AttriloopMatchStatus.failed.raw).apply {
@@ -1499,7 +1517,11 @@ object Attriloop {
             fetchAttribution(0)
             return
         }
-        if (AttributionDecision.decide(attribution).repollNextLaunch) fetchAttribution(0, single = true)
+        // A 0.2.x cache (raw legacy body) polls once so the current edge can fill
+        // `attribution_params`; the poll persists the upgraded map.
+        if (upgradedLegacyCache || AttributionDecision.decide(attribution).repollNextLaunch) {
+            fetchAttribution(0, single = true)
+        }
     }
 
     /**
@@ -1738,7 +1760,9 @@ object Attriloop {
     /** Run the configure-time restore + launch poll against the current test prefs. */
     internal fun relaunchForTest() {
         awaitIo()
-        attribution = prefs.getString(ATTR_KEY, null)?.let { jsonToMap(JSONObject(it)) } ?: emptyMap()
+        val saved = prefs.getString(ATTR_KEY, null)?.let { jsonToMap(JSONObject(it)) } ?: emptyMap()
+        upgradedLegacyCache = saved.isNotEmpty() && AttributionDecision.isLegacyCache(saved)
+        attribution = AttributionDecision.restoredParams(saved, attriloopId)
         matchStatus = AttriloopMatchStatus.restored(true, prefs.getString(MATCH_STATUS_KEY, null), attribution)
         polling.set(false)
         pollOnLaunch()
@@ -1767,6 +1791,7 @@ object Attriloop {
             // Executor may be idle; isolation still proceeds.
         }
         apiKey = ""
+        upgradedLegacyCache = false
         debug = false
         baseUrl = DEFAULT_BASE_URL
         packageName = ""
